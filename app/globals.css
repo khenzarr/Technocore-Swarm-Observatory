@@ -1,0 +1,434 @@
+/*
+ * Research-instrument styling: near-black field, one cyan signal colour, one amber
+ * warning colour, monospace throughout. Chrome is deliberately thin so the swarm field
+ * keeps the screen.
+ */
+
+:root {
+  --bg: #04060a;
+  --panel: #080c12;
+  --line: #16202c;
+  --line-bright: #223142;
+  --ink: #e6f1f7;
+  --ink-dim: #7d94a6;
+  --ink-faint: #4a5a68;
+  --signal: #35e6ff;
+  --signal-deep: #0d7f92;
+  --warn: #ffb347;
+  --gap: #ff3f6f;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  /* Faint instrument vignette. Keeps the corners from reading as flat black. */
+  background-image: radial-gradient(120% 90% at 50% 0%, #0a1420 0%, var(--bg) 62%);
+  overflow: hidden;
+}
+
+button,
+select,
+input,
+label {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: transparent;
+  border: 1px solid var(--line-bright);
+  color: var(--ink-dim);
+  padding: 4px 10px;
+  cursor: pointer;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 11px;
+  transition: color 120ms linear, border-color 120ms linear, background 120ms linear;
+}
+
+button:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--signal-deep);
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+button[data-active='true'] {
+  color: var(--bg);
+  background: var(--signal);
+  border-color: var(--signal);
+}
+
+button:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 1px solid var(--signal);
+  outline-offset: 1px;
+}
+
+select {
+  background: var(--panel);
+  border: 1px solid var(--line-bright);
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+/* ── layout ─────────────────────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  height: 100vh;
+  padding: 14px 18px 10px;
+  gap: 10px;
+}
+
+.masthead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+
+.wordmark {
+  font-size: 22px;
+  letter-spacing: 0.34em;
+  line-height: 1.1;
+  margin: 0;
+  font-weight: 500;
+}
+
+.wordmark span {
+  display: block;
+  color: var(--signal);
+}
+
+.tagline {
+  color: var(--ink-dim);
+  margin: 6px 0 0;
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  letter-spacing: 0.2em;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.status[data-mode='live'] { color: var(--signal); }
+.status[data-mode='paused'] { color: var(--ink-dim); }
+.status[data-mode='replay'] { color: var(--warn); }
+.status[data-mode='synthetic'] { color: var(--warn); }
+
+.status[data-mode='live'] .dot {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* ── metrics ────────────────────────────────────────────────────────── */
+
+.metrics {
+  display: flex;
+  gap: 34px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.metric b {
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.metric small {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.metric[data-tone='warn'] b { color: var(--warn); }
+.metric[data-tone='gap'] b { color: var(--gap); }
+
+.metrics .rate {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 260px;
+  flex: 0 1 420px;
+}
+
+.metrics .rate small {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  display: flex;
+  justify-content: space-between;
+}
+
+/* ── field ──────────────────────────────────────────────────────────── */
+
+.field {
+  position: relative;
+  border: 1px solid var(--line);
+  background: #03050899;
+  min-height: 0;
+}
+
+.field canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.field .axis-label {
+  position: absolute;
+  left: 10px;
+  bottom: 6px;
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  pointer-events: none;
+}
+
+.field .empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  text-align: center;
+  color: var(--ink-dim);
+  letter-spacing: 0.16em;
+  font-size: 11px;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.inspect {
+  position: absolute;
+  z-index: 5;
+  min-width: 230px;
+  max-width: 320px;
+  background: #060a10f2;
+  border: 1px solid var(--line-bright);
+  padding: 9px 11px;
+  pointer-events: none;
+  box-shadow: 0 10px 30px #000a;
+}
+
+.inspect h4 {
+  margin: 0 0 7px;
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--signal);
+  text-transform: uppercase;
+}
+
+.inspect[data-kind='gap'] h4 { color: var(--gap); }
+.inspect[data-kind='start'] h4 { color: var(--warn); }
+
+.inspect dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  font-size: 11px;
+}
+
+.inspect dt {
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 10px;
+}
+
+.inspect dd {
+  margin: 0;
+  /* Untrusted sender-derived text. Rendered as text, wrapped, never as markup. */
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.inspect p {
+  margin: 7px 0 0;
+  color: var(--ink-dim);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+/* ── controls ───────────────────────────────────────────────────────── */
+
+.console {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.console .group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.console .sep {
+  width: 1px;
+  height: 18px;
+  background: var(--line-bright);
+}
+
+.console label {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.rooms {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  overflow: hidden;
+}
+
+.rooms button {
+  padding: 3px 7px;
+  font-size: 10px;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.rooms button i {
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  display: inline-block;
+}
+
+.scrubber {
+  flex: 1 1 220px;
+  min-width: 160px;
+  accent-color: var(--signal);
+}
+
+.creed {
+  margin-left: auto;
+  color: var(--ink-faint);
+  letter-spacing: 0.24em;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.notice {
+  color: var(--warn);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* ── about ──────────────────────────────────────────────────────────── */
+
+details.about {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+details.about summary {
+  cursor: pointer;
+  color: var(--ink-dim);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  list-style: none;
+}
+
+details.about summary::-webkit-details-marker {
+  display: none;
+}
+
+details.about summary::before {
+  content: '▸ ';
+  color: var(--signal-deep);
+}
+
+details.about[open] summary::before {
+  content: '▾ ';
+}
+
+details.about ul {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  columns: 2;
+  column-gap: 34px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+details.about b {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+@media (max-width: 1100px) {
+  details.about ul { columns: 1; }
+  .metrics { gap: 20px; }
+  .metric b { font-size: 20px; }
+}

@@ -1,0 +1,17 @@
+node_modules
+.next
+out
+dist
+build
+coverage
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+Thumbs.db
+*.zip
+sessions/
