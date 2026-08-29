@@ -17,12 +17,27 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ObservationSessionState } from '@/lib/session';
 import type { GapEvent, ObservedSender } from '@/lib/types';
 import { GAP_COLOR, START_COLOR, roomColor } from '@/lib/palette';
+import {
+  collectVisibleCoverageEvents,
+  collectVisibleMarks,
+  collectVisibleTrails,
+  createMarkBuffer,
+  laneCount as laneCountOf,
+} from '@/lib/renderModel';
+
 
 const LEFT_PAD = 8;
 const RIGHT_PAD = 8;
 const TOP_PAD = 10;
 const BOTTOM_PAD = 22;
-const MARK_MIN_HEIGHT = 1.5;
+/**
+ * Marks are sized for a 1080p screen recording rather than for a close look at a monitor:
+ * a single observation has to survive video encoding, so nothing is ever drawn thinner
+ * than about two device pixels at this scale.
+ */
+const MARK_MIN_HEIGHT = 2;
+const MARK_WIDTH = 3.2;
+
 
 export interface SwarmFieldProps {
   session: ObservationSessionState;
@@ -55,6 +70,9 @@ export default function SwarmField(props: SwarmFieldProps) {
 
   /** Lane geometry, recomputed per frame. Shared with hit-testing. */
   const geom = useRef({ laneCount: 1, height: 0, width: 0, t0: 0, t1: 1 });
+  /** Reused per frame so a populated field does not allocate per mark. */
+  const marks = useRef(createMarkBuffer());
+
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -79,13 +97,15 @@ export default function SwarmField(props: SwarmFieldProps) {
     const plotH = cssHeight - TOP_PAD - BOTTOM_PAD;
     const xOf = (t: number) => LEFT_PAD + ((t - t0) / span) * plotW;
 
+    // The window this frame draws. Everything visible is derived from it through the
+    // render model, so what the canvas draws is exactly what a test can assert on.
+    const view = { now: t1, windowMs: span, roomFilter: filter };
+
     // Lanes are assignment-ordered, so a sender never jumps as new senders appear.
-    let laneCount = 0;
-    for (const sender of s.senders.values()) {
-      if (sender.lane + 1 > laneCount) laneCount = sender.lane + 1;
-    }
-    laneCount = Math.max(laneCount, 1);
+
+    const laneCount = laneCountOf(s);
     const laneH = plotH / laneCount;
+
     const yOf = (lane: number) => TOP_PAD + lane * laneH + laneH / 2;
     geom.current = { laneCount, height: cssHeight, width: cssWidth, t0, t1 };
 
@@ -108,47 +128,45 @@ export default function SwarmField(props: SwarmFieldProps) {
     // ── sender trails ──────────────────────────────────────────────────
     // A faint line from first to last observation gives the field its structure and makes
     // an idle sender visibly idle rather than absent.
-    ctx.lineWidth = Math.max(0.6, Math.min(laneH * 0.5, 1.4));
-    for (const sender of s.senders.values()) {
-      if (filter !== null && !sender.roomsObserved.includes(filter)) continue;
-      const from = Math.max(sender.firstObservedAt, t0);
-      const to = Math.min(sender.lastObservedAt, t1);
-      if (to < t0 || from > t1) continue;
-      const y = Math.round(yOf(sender.lane)) + 0.5;
-      ctx.strokeStyle = withAlpha(roomColor(sender.latestRoom), 0.16);
+    ctx.lineWidth = Math.max(1, Math.min(laneH * 0.5, 1.8));
+    for (const trail of collectVisibleTrails(s, view)) {
+      const y = Math.round(yOf(trail.lane)) + 0.5;
+      ctx.strokeStyle = withAlpha(roomColor(trail.room), 0.34);
+
       ctx.beginPath();
-      ctx.moveTo(xOf(from), y);
-      ctx.lineTo(xOf(to), y);
+      ctx.moveTo(xOf(trail.from), y);
+      ctx.lineTo(xOf(trail.to), y);
       ctx.stroke();
       // Lead dot at the sender's first observation: where this thread enters the session.
-      if (sender.firstObservedAt >= t0) {
-        ctx.fillStyle = withAlpha(roomColor(sender.latestRoom), 0.75);
-        ctx.fillRect(xOf(sender.firstObservedAt) - 1, y - 1.5, 2.5, 3);
+      if (trail.entersHere) {
+        ctx.fillStyle = withAlpha(roomColor(trail.room), 0.9);
+        ctx.fillRect(xOf(trail.from) - 1.5, y - 2, 3.5, 4);
       }
     }
 
     // ── observation marks ──────────────────────────────────────────────
-    const markH = Math.max(MARK_MIN_HEIGHT, Math.min(laneH * 0.85, 3));
-    const messages = s.messages;
-    for (let i = 0; i < messages.length; i++) {
-      const m = messages[i];
-      if (m.observedAt < t0 || m.observedAt > t1) continue;
-      if (filter !== null && m.room !== filter) continue;
-      const sender = s.senders.get(m.sender);
-      if (!sender) continue;
+    const markH = Math.max(MARK_MIN_HEIGHT, Math.min(laneH * 0.9, 4));
+    const markW = MARK_WIDTH;
+
+    marks.current = collectVisibleMarks(s, view, marks.current);
+    const buffer = marks.current;
+    for (let i = 0; i < buffer.count; i++) {
+      const at = buffer.observedAt[i];
       // Recent marks burn brighter, which is what gives the live edge its motion.
-      const age = (t1 - m.observedAt) / span;
-      const alpha = 0.34 + 0.66 * Math.pow(1 - age, 3);
-      ctx.fillStyle = withAlpha(roomColor(m.room), alpha);
-      ctx.fillRect(xOf(m.observedAt) - 0.75, yOf(sender.lane) - markH / 2, 1.8, markH);
+      const age = (t1 - at) / span;
+      // Recency is a strong cue but never fades an older mark below readable: the whole
+      // window has to stay legible in a recording, not just the live edge.
+      const alpha = 0.5 + 0.5 * Math.pow(1 - age, 3);
+
+      ctx.fillStyle = withAlpha(roomColor(buffer.room[i]), alpha);
+      ctx.fillRect(xOf(at) - markW / 2, yOf(buffer.lane[i]) - markH / 2, markW, markH);
     }
 
     // ── coverage events ────────────────────────────────────────────────
     // Drawn last so they are never buried by activity, and in a colour no room can use.
-    for (const event of s.coverageEvents) {
-      if (event.observedAt < t0 || event.observedAt > t1) continue;
-      if (filter !== null && event.room !== filter) continue;
+    for (const event of collectVisibleCoverageEvents(s, view)) {
       const x = xOf(event.observedAt);
+
       if (event.kind === 'gap') {
         // A band, not a line: a gap is an interval of unavailable sequence positions.
         const w = Math.max(3, Math.min(10, plotW * 0.004));

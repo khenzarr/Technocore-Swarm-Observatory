@@ -12,10 +12,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SwarmField from './SwarmField';
 import RateChart from './RateChart';
 import { ObservationSessionState } from '@/lib/session';
-import { LiveCollector } from '@/lib/collector';
+import { LiveCollector, type CollectorStatus } from '@/lib/collector';
+import { createInitialState, type InitialState } from '@/lib/bootstrap';
+
 import { generateSyntheticSession } from '@/lib/synthetic';
 import { SessionImportError, parseSessionFile } from '@/lib/sessionSchema';
+
 import { UPSTREAM_MAIN_SHA } from '@/lib/protocol';
+
 import { roomColor } from '@/lib/palette';
 import type { ObservatoryMode, SessionAggregates } from '@/lib/types';
 
@@ -25,32 +29,63 @@ const WINDOW_MS = 6 * 60_000;
 const SAMPLE_MS = 500;
 const REPLAY_SPEEDS = [0.5, 1, 2, 5, 10] as const;
 
-const EMPTY_AGGREGATES: SessionAggregates = {
-  senders: 0,
-  observations: 0,
-  rooms: 0,
-  knownGaps: 0,
-  knownMissingSequencePositions: 0,
-  messagesPerMinute: 0,
-  knownSessionCoverage: null,
-};
 
-export default function Observatory({ demo }: { demo: boolean }) {
-  const [mode, setMode] = useState<ObservatoryMode>(demo ? 'synthetic' : 'live');
-  const [aggregates, setAggregates] = useState<SessionAggregates>(EMPTY_AGGREGATES);
-  const [series, setSeries] = useState<Array<[number, number]>>([]);
+export default function Observatory({
+  demo,
+  bootstrapAt,
+}: {
+  demo: boolean;
+  /**
+   * The instant the synthetic session ends, chosen once on the server. Both renders must
+   * use the same value or the demo session differs across hydration.
+   */
+  bootstrapAt: number;
+}) {
+  /**
+   * Built once, before first paint, so demo mode's very first frame already has a
+   * populated session behind it and never shows a live-like empty state.
+   */
+  const initialRef = useRef<InitialState | null>(null);
+  initialRef.current ??= createInitialState(demo, bootstrapAt);
+
+  const initial = initialRef.current;
+
+  const [mode, setMode] = useState<ObservatoryMode>(initial.mode);
+  // Seeded from the initial session rather than from zeros: the metrics strip is sampled on
+  // an interval, so starting empty made a populated demo session read as an empty live one
+  // until the first tick landed.
+  const [aggregates, setAggregates] = useState<SessionAggregates>(() =>
+    initial.session.aggregates(initial.session.endedAt ?? Date.now()),
+  );
+  const [series, setSeries] = useState<Array<[number, number]>>(() =>
+    initial.session.activitySeries(),
+  );
   const [roomFilter, setRoomFilter] = useState<string | null>(null);
-  const [rooms, setRooms] = useState<string[]>([]);
+  const [rooms, setRooms] = useState<string[]>(() => [...initial.session.rooms.keys()]);
+
   const [notice, setNotice] = useState<string | null>(null);
+  const [collectorStatus, setCollectorStatus] = useState<CollectorStatus>('idle');
+  /**
+   * Render invalidation counter. Bumped whenever the mutable session has changed and the
+   * chrome needs to look again.
+   */
   const [version, setVersion] = useState(0);
+  /**
+   * Data-source generation. Bumped only when the session object itself is replaced, and it
+   * is the collector effect's dependency: if the collector restarted on every `version`
+   * change it would abort itself on its own first observation.
+   */
+  const [sessionEpoch, setSessionEpoch] = useState(0);
   const [speed, setSpeed] = useState<number>(1);
+
   /** Replay position, 0..1 across the session's span. */
   const [replayAt, setReplayAt] = useState(1);
   const [now, setNow] = useState(() => Date.now());
 
-  const sessionRef = useRef<ObservationSessionState>(
-    demo ? generateSyntheticSession() : new ObservationSessionState('live'),
-  );
+  // The same object the initial aggregates were read from, so the numbers in the header and
+  // the marks on the canvas can never describe two different sessions.
+  const sessionRef = useRef<ObservationSessionState>(initial.session);
+
   const collectorRef = useRef<LiveCollector | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -65,8 +100,11 @@ export default function Observatory({ demo }: { demo: boolean }) {
     setRooms([...next.rooms.keys()]);
     setMode(nextMode);
     setVersion((v) => v + 1);
+    setSessionEpoch((e) => e + 1);
+    setCollectorStatus('idle');
     setReplayAt(1);
   }, []);
+
 
   // ── live collection ────────────────────────────────────────────────
   useEffect(() => {
@@ -83,14 +121,30 @@ export default function Observatory({ demo }: { demo: boolean }) {
         setNotice(discovered.length === 0 ? 'no active public rooms discovered' : null);
       },
       onError: (message) => setNotice(message),
+      onStatus: (next) => {
+        setCollectorStatus(next);
+        // A successful read clears a stale retry notice rather than leaving the last
+
+        // failure on screen while the observer is demonstrably working again.
+        if (next === 'observing') setNotice(null);
+      },
+      // The canvas reads the mutable session on its own frame loop, but the metrics strip
+      // samples on an interval. Bumping the render version on the first observations keeps
+      // the "awaiting first observation" state from outliving the data by up to a tick.
+      onUpdate: () => setVersion((v) => v + 1),
     });
+
     collectorRef.current = collector;
     void collector.start();
     return () => {
       collector.stop();
       collectorRef.current = null;
     };
-  }, [mode, version]);
+    // Deliberately keyed on the data-source generation, not on `version`: `version` is
+    // bumped by this collector's own `onUpdate`, so depending on it tore the collector down
+    // and rebuilt it on every successful read, aborting the in-flight long polls forever.
+  }, [mode, sessionEpoch]);
+
 
   // ── clock and metrics sampling ─────────────────────────────────────
   useEffect(() => {
@@ -177,6 +231,21 @@ export default function Observatory({ demo }: { demo: boolean }) {
     synthetic: 'SYNTHETIC DEMO',
   };
 
+  /**
+   * One line of observer state, so a quiet screen is legible: waiting on discovery reads
+   * differently from waiting on upstream traffic. Only meaningful for a live session.
+   */
+  const observerLabel: Record<CollectorStatus, string> = {
+    idle: '',
+    discovering: 'DISCOVERING ROOMS',
+    connecting: 'CONNECTING',
+    observing: 'OBSERVING',
+    retrying: 'RETRYING',
+  };
+  const observerStatus =
+    mode === 'live' && collectorStatus !== 'idle' ? observerLabel[collectorStatus] : null;
+
+
   const activeRooms = useMemo(() => {
     const observed = [...session.rooms.values()]
       .filter((r) => r.messagesObserved > 0)
@@ -203,7 +272,11 @@ export default function Observatory({ demo }: { demo: boolean }) {
             <span className="dot" />
             {statusLabel[mode]}
           </div>
+          {observerStatus && (
+            <div className="observer-status" data-state={collectorStatus}>{observerStatus}</div>
+          )}
           {notice && <div className="notice" style={{ marginTop: 6 }}>{notice}</div>}
+
         </div>
       </header>
 

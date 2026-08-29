@@ -228,9 +228,64 @@ export function parseRoomsView(value: unknown): RoomsView | null {
   };
 }
 
+/**
+ * Parse a room view that has already been normalized by this app's own route handler.
+ *
+ * The upstream document uses `first_seq`/`last_seq`; `parseRoomView` consumes that shape.
+ * Once a view has passed through `/api/tc/room/<room>` it is serialized as `RoomView`,
+ * i.e. camelCase. Re-running the upstream parser over an already-normalized document
+ * silently yields `firstSeq: null, lastSeq: 0`, which reads as an empty tail and discards
+ * real observations. These parsers exist so the client never has to guess which shape it
+ * holds.
+ */
+export function parseNormalizedRoomView(value: unknown, expectedRoom: string): RoomView | null {
+  if (!isRecord(value)) return null;
+  if (value.room !== expectedRoom) return null;
+  if (!Array.isArray(value.messages)) return null;
+
+  const messages: RawMessage[] = [];
+  for (const item of value.messages) {
+    const parsed = parseMessage(item);
+    if (parsed !== null) messages.push(parsed);
+  }
+  messages.sort((a, b) => a.seq - b.seq);
+
+  return {
+    room: expectedRoom,
+    count: isPositiveInt(value.count) ? value.count : messages.length,
+    firstSeq: isPositiveInt(value.firstSeq) ? value.firstSeq : null,
+    lastSeq: isPositiveInt(value.lastSeq) ? value.lastSeq : 0,
+    generation: isPositiveInt(value.generation) ? value.generation : null,
+    messages,
+  };
+}
+
+/** The already-normalized counterpart of `parseRoomsView`. See `parseNormalizedRoomView`. */
+export function parseNormalizedRoomsView(value: unknown): RoomsView | null {
+  if (!isRecord(value) || !Array.isArray(value.rooms)) return null;
+  const rooms: RoomListingEntry[] = [];
+  for (const item of value.rooms) {
+    if (!isRecord(item)) continue;
+    if (!isObservableRoomName(item.room)) continue;
+    rooms.push({
+      room: item.room,
+      lastSeq: isPositiveInt(item.lastSeq) ? item.lastSeq : 0,
+      bytes: isPositiveInt(item.bytes) ? item.bytes : 0,
+      idleSeconds: isPositiveInt(item.idleSeconds) ? item.idleSeconds : 0,
+      topic: typeof item.topic === 'string' ? item.topic.slice(0, 160) : '',
+    });
+  }
+  return {
+    rooms,
+    total: isPositiveInt(value.total) ? value.total : rooms.length,
+    capacity: isPositiveInt(value.capacity) ? value.capacity : 0,
+  };
+}
+
 /** `did:key:` presence is a fact about a string. It is not identity, reputation or trust. */
 export function hasDidPrefix(from: string): boolean {
   return from.startsWith('did:key:');
+
 }
 
 /** A compact, inert display label. Never treated as a name a caller can rely on. */

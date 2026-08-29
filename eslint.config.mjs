@@ -43,4 +43,17 @@ export default tseslint.config(
       'prefer-const': 'error',
     },
   },
+  {
+    // Build config and dev-time scripts run in Node, not in the browser sandbox the
+    // application code is linted against.
+    files: ['*.mjs', '*.config.ts', 'scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        WebSocket: 'readonly',
+      },
+    },
+  },
 );
+
+

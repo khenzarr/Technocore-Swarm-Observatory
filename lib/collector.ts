@@ -1,17 +1,17 @@
 /**
  * Live collector.
  *
- * Discovers busy public rooms once, then long-polls a bounded set of them through this
- * app's own read-only routes. Concurrency stays under the upstream per-IP waiter budget,
- * and every read is a plain GET. The collector has no write path of any kind.
+ * Discovers busy public rooms, then long-polls a bounded set of them through this app's
+ * own read-only routes. Concurrency stays under the upstream per-IP waiter budget, and
+ * every read is a plain GET. The collector has no write path of any kind.
  */
 
 import {
   MAX_CONCURRENT_POLLS,
   MAX_WATCHED_ROOMS,
   isObservableRoomName,
-  parseRoomView,
-  parseRoomsView,
+  parseNormalizedRoomView,
+  parseNormalizedRoomsView,
   type RoomListingEntry,
 } from './protocol';
 import type { ObservationSessionState } from './session';
@@ -21,11 +21,17 @@ const READ_LIMIT = 200;
 /** Pause between poll rounds. Keeps well inside the published 600 reads/min per IP. */
 const ROUND_DELAY_MS = 700;
 const BACKOFF_MS = 5_000;
+/** Delay before re-attempting discovery. A discovery failure is transient, not terminal. */
+const DISCOVERY_RETRY_MS = 4_000;
+
+/** What the observer is currently doing, for a one-line user-visible status. */
+export type CollectorStatus = 'idle' | 'discovering' | 'connecting' | 'observing' | 'retrying';
 
 export interface CollectorEvents {
   onUpdate?: () => void;
   onError?: (message: string) => void;
   onRooms?: (rooms: string[]) => void;
+  onStatus?: (status: CollectorStatus) => void;
 }
 
 export class LiveCollector {
@@ -34,6 +40,7 @@ export class LiveCollector {
   private controller: AbortController | null = null;
   private running = false;
   private watched: string[] = [];
+  private observedAtLeastOnce = false;
 
   constructor(session: ObservationSessionState, events: CollectorEvents = {}) {
     if (session.provenance !== 'live') {
@@ -51,19 +58,59 @@ export class LiveCollector {
     return this.watched;
   }
 
+  /**
+   * Begin observing. Resolves once discovery has produced a watch set and the poll loop is
+   * running; the loop itself continues until `stop()`.
+   *
+   * Discovery is retried rather than treated as fatal. The previous behaviour returned
+   * after a single failure and left the observer permanently idle with no polling and no
+   * path back to a working state, which is indistinguishable in the UI from silence
+   * upstream.
+   */
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
     this.controller = new AbortController();
     const signal = this.controller.signal;
 
-    try {
-      this.watched = await this.discoverRooms(signal);
+    for (;;) {
+      if (!this.running || signal.aborted) {
+        this.running = false;
+        this.events.onStatus?.('idle');
+        return;
+      }
+
+      this.events.onStatus?.('discovering');
+      let rooms: string[];
+      try {
+        rooms = await this.discoverRooms(signal);
+      } catch (error) {
+        if (signal.aborted) {
+          this.running = false;
+          this.events.onStatus?.('idle');
+          return;
+        }
+        this.events.onError?.(
+          error instanceof Error ? `room discovery failed: ${error.message}` : 'room discovery failed',
+        );
+        this.events.onStatus?.('retrying');
+        await sleep(DISCOVERY_RETRY_MS, signal);
+        continue;
+      }
+
+      // An empty watch set is a real outcome (every listed room idle or empty), but it must
+      // not silently look like a running observer: retry instead of polling nothing.
+      if (rooms.length === 0) {
+        this.events.onError?.('no active public rooms in the current listing');
+        this.events.onStatus?.('retrying');
+        await sleep(DISCOVERY_RETRY_MS, signal);
+        continue;
+      }
+
+      this.watched = rooms;
       this.events.onRooms?.(this.watched);
-    } catch {
-      this.running = false;
-      this.events.onError?.('room discovery failed');
-      return;
+      this.events.onStatus?.('connecting');
+      break;
     }
 
     void this.loop(signal);
@@ -73,6 +120,7 @@ export class LiveCollector {
     this.running = false;
     this.controller?.abort();
     this.controller = null;
+    this.events.onStatus?.('idle');
   }
 
   /**
@@ -81,9 +129,10 @@ export class LiveCollector {
    */
   private async discoverRooms(signal: AbortSignal): Promise<string[]> {
     const response = await fetch('/api/tc/rooms?limit=60', { signal, cache: 'no-store' });
-    if (!response.ok) throw new Error('discovery failed');
-    const listing = parseRoomsView(await response.json());
-    if (!listing) throw new Error('discovery returned an unexpected shape');
+    if (!response.ok) throw new Error(`listing route returned ${response.status}`);
+    // This document came from our own route, so it is already normalized to `RoomsView`.
+    const listing = parseNormalizedRoomsView(await response.json());
+    if (!listing) throw new Error('listing did not match the expected shape');
 
     const candidates: RoomListingEntry[] = listing.rooms
       .filter((r) => isObservableRoomName(r.room) && r.idleSeconds < 300 && r.lastSeq > 5)
@@ -130,21 +179,33 @@ export class LiveCollector {
       });
       if (response.status === 429) {
         this.events.onError?.('upstream rate limit reached, backing off');
+        this.events.onStatus?.('retrying');
         await sleep(BACKOFF_MS, signal);
         return;
       }
       if (!response.ok) {
+        this.events.onError?.(`room read failed for ${room} (${response.status})`);
+        this.events.onStatus?.('retrying');
         await sleep(BACKOFF_MS, signal);
         return;
       }
       payload = await response.json();
     } catch {
-      if (!signal.aborted) await sleep(BACKOFF_MS, signal);
+      // An abort is this observer shutting down, not an upstream problem: stay quiet.
+      if (signal.aborted) return;
+      this.events.onError?.(`room read failed for ${room}`);
+      this.events.onStatus?.('retrying');
+      await sleep(BACKOFF_MS, signal);
       return;
     }
 
-    const view = parseRoomView(payload, room);
-    if (!view) return;
+    // The payload came from our own route, so it is already `RoomView`-shaped. Parsing it
+    // with the upstream (`first_seq`) parser reports every read as an empty tail.
+    const view = parseNormalizedRoomView(payload, room);
+    if (!view) {
+      this.events.onError?.(`unreadable room view for ${room}`);
+      return;
+    }
 
     this.session.ingestRoomRead({
       room,
@@ -156,6 +217,9 @@ export class LiveCollector {
       messages: view.messages,
       provenance: 'live',
     });
+
+    if (!this.observedAtLeastOnce) this.observedAtLeastOnce = true;
+    this.events.onStatus?.('observing');
     this.events.onUpdate?.();
   }
 }

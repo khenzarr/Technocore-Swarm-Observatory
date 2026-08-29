@@ -376,8 +376,26 @@ select {
   white-space: nowrap;
 }
 
+/* One compact line of live-observer state. Not a debug panel. */
+.observer-status {
+  margin-top: 6px;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--ink-faint);
+}
+
+.observer-status[data-state='observing'] {
+  color: var(--signal);
+}
+
+
+.observer-status[data-state='retrying'] {
+  color: var(--warn);
+}
+
 .notice {
   color: var(--warn);
+
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
