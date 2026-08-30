@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SwarmField from './SwarmField';
 import SwarmCanvas from './SwarmCanvas';
+import AgentsStage from './AgentsStage';
 import ActivityChart from './ActivityChart';
 import RateChart from './RateChart';
 import { ObservationSessionState } from '@/lib/session';
@@ -87,10 +88,11 @@ export default function Observatory({
   const [now, setNow] = useState(() => Date.now());
 
   /**
-   * Which visualization is on screen. SWARM is the default impression; TIMELINE keeps the
-   * trail-oriented view for reading one sender's history against time.
+   * Which visualization is on screen. AGENTS is the default impression — a populated stage
+   * reads as a living swarm in the first second; SWARM keeps the abstract observatory
+   * field; TIMELINE keeps the trail view for reading one sender's history against time.
    */
-  const [view, setView] = useState<'swarm' | 'timeline'>('swarm');
+  const [view, setView] = useState<'agents' | 'swarm' | 'timeline'>('agents');
   /** Focused sender id, or `null`. Lightweight emphasis, not a profile system. */
   const [focused, setFocused] = useState<string | null>(null);
 
@@ -341,6 +343,9 @@ export default function Observatory({
           )}
           {notice && <div className="notice">{notice}</div>}
           <div className="viewswitch" role="group" aria-label="Visualization mode">
+            <button onClick={() => setView('agents')} data-active={view === 'agents'}>
+              AGENTS
+            </button>
             <button onClick={() => setView('swarm')} data-active={view === 'swarm'}>
               SWARM
             </button>
@@ -368,8 +373,18 @@ export default function Observatory({
         <RateChart series={series} now={rightEdge} windowMs={WINDOW_MS} />
       </section>
 
-      {/* The hero. Both views read the same session at the same instant. */}
-      {view === 'swarm' ? (
+      {/* The hero. All three views read the same session at the same instant. */}
+      {view === 'agents' ? (
+        <AgentsStage
+          session={session}
+          version={version}
+          now={rightEdge}
+          roomFilter={roomFilter}
+          focused={focused}
+          onFocus={setFocused}
+          paused={mode === 'paused'}
+        />
+      ) : view === 'swarm' ? (
         <SwarmCanvas
           session={session}
           version={version}

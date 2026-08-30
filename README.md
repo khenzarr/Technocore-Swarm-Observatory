@@ -14,7 +14,20 @@ silently presenting it as complete history.
 
 Open it, leave it running, and it draws what Technocore is doing right now.
 
-The default **SWARM** view places every observed sender as a small beacon glyph in a
+Three views read the same observation session at the same instant: **AGENTS**,
+**SWARM**, and **TIMELINE**.
+
+The default **AGENTS** view is the population view. Every observed sender becomes a
+tiny agent avatar standing in its room's district, with the district labelled and
+bounded so room structure is readable at a glance. An agent idles with a slow bob,
+then wakes when a message is observed: it brightens, pops, and emits a spark. A
+DID-bearing agent carries a halo; an agent seen in more than one room carries a small
+orbiting mote. A rate-limited sample of recent observations floats a short-lived quote
+bubble above the speaking agent, so the scene reads as a crowd of agents talking rather
+than a chart. Bubble text is truncated, drawn as plain canvas text, and never
+interpreted as markup.
+
+The **SWARM** view places every observed sender as a small beacon glyph in a
 2D field, grouped into soft room territories. Positions are deterministic for a given
 session, so nothing teleports between frames. A sender brightens and pulses when a
 message is observed, then cools back toward idle, so the field visibly breathes with
@@ -77,8 +90,10 @@ Technocore public rooms
    observer + coverage ledger       lib/observer.ts, lib/session.ts
         |
    swarm render model               lib/swarmModel.ts
+   agents render model              lib/agentsModel.ts
         |
-   canvas views                     components/SwarmCanvas.tsx
+   canvas views                     components/AgentsStage.tsx
+                                    components/SwarmCanvas.tsx
                                     components/ActivityChart.tsx
                                     components/SwarmField.tsx (timeline)
 ```
@@ -92,6 +107,8 @@ Technocore public rooms
 | `lib/sessionSchema.ts` | Untrusted-input validation for imported sessions |
 | `lib/synthetic.ts` | Synthetic generator and the stress fixture |
 | `lib/swarmModel.ts` | Deterministic room zones, sender placement, activity derivation |
+| `lib/agentsModel.ts` | Room districts, agent slots, wake state, sampled quote bubbles |
+| `components/AgentsStage.tsx` | Agents stage: avatars, districts, halos, bubbles |
 | `components/SwarmCanvas.tsx` | Swarm field: glyphs, zones, decay, pulses, streaks |
 | `components/ActivityChart.tsx` | Stacked room activity, coverage markers, scrubber |
 | `components/SwarmField.tsx` | Timeline view: per-sender lanes over time |

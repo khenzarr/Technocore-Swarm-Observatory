@@ -134,7 +134,7 @@ select {
   line-height: 1.1;
 }
 
-/* Compact mode switch: SWARM | TIMELINE. */
+/* Compact mode switch: AGENTS | SWARM | TIMELINE. */
 .viewswitch {
   display: flex;
   border: 1px solid var(--line-bright);
@@ -298,6 +298,18 @@ select {
  */
 .field.swarm {
   background: #02040799;
+  cursor: crosshair;
+}
+
+/*
+ * AGENTS is the same hero slot, played as a stage rather than as a field: a faint vertical
+ * lift behind the districts so the population reads as standing in a lit space. Everything
+ * else is drawn on the canvas.
+ */
+.field.agents {
+  background:
+    radial-gradient(120% 90% at 50% 0%, #0a1a2633 0%, #02040700 62%),
+    #02040799;
   cursor: crosshair;
 }
 
