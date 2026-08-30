@@ -5,12 +5,18 @@
  * abstract swarm field and the timeline lanes. Where `swarmModel` answers "where does
  * every sender sit in its room's territory", this answers a more theatrical question:
  *
- *   1. which district does every observed sender stand in   (`buildAgentsLayout`)
- *   2. what is each agent doing at time T                   (`sampleAgentsState`)
- *   3. which observations get a short quote bubble at T      (`sampleAgentBubbles`)
+ *   1. where does every observed sender stand in the shared arena  (`buildAgentsLayout`)
+ *   2. what is each agent doing at time T                          (`sampleAgentsState`)
+ *   3. which observations get a short quote bubble at T             (`sampleAgentBubbles`)
+ *
+ * The arena is deliberately one continuous space. Every observed sender stands in the
+ * same field, and room membership is carried by the agent itself — its stable room colour,
+ * the legend, hover metadata and the filters — rather than by physically segregating the
+ * population into per-room districts. A sender's position is a pure function of its
+ * identity, so an agent observed in a second room changes colour without ever teleporting.
  *
  * Same contract as the swarm model, deliberately: positions are normalized to the unit
- * square so a resize never re-lays out the stage, `at` is the only time input so live and
+ * square so a resize never re-lays out the arena, `at` is the only time input so live and
  * replay are one code path, and nothing here invents state. Presence, activity recency,
  * room membership, literal `did:key:` prefix presence and multi-room appearance are all
  * read from observation metadata the session already holds. No trust, no reputation, no
@@ -22,7 +28,7 @@
  */
 
 import type { ObservationSessionState } from './session';
-import { gridFor, hash32 } from './swarmModel';
+import { hash32 } from './swarmModel';
 
 /** How long an agent stays visibly "popping" after an observation. */
 export const AGENT_PULSE_MS = 900;
@@ -32,7 +38,7 @@ export const AGENT_DECAY_MS = 14_000;
 export const AGENT_SPAWN_MS = 1_100;
 /** Quote-bubble lifetime. Long enough to read, short enough not to accumulate. */
 export const BUBBLE_MS = 2_800;
-/** Concurrent bubbles on stage. A hard ceiling, independent of traffic volume. */
+/** Concurrent bubbles in the arena. A hard ceiling, independent of traffic volume. */
 export const BUBBLE_MAX = 6;
 /**
  * Bubble sampling divisor. Roughly one observation in this many is eligible for a bubble,
@@ -43,24 +49,32 @@ export const BUBBLE_SAMPLE = 7;
 /** Visible characters in a bubble before truncation. */
 export const BUBBLE_TEXT_MAX = 42;
 
-/** Depth rows per district. More rows reads as a crowd; fewer reads as a line-up. */
-const DISTRICT_ROWS = 6;
-/** Drawn agents per district. Beyond this a district reports overflow instead. */
-const DISTRICT_CAPACITY = 132;
+/**
+ * The arena's virtual cell grid.
+ *
+ * Fixed, never derived from the population: a grid that grew with the sender count would
+ * re-place every existing agent the moment a new one arrived. 64 × 32 = 2,048 standing
+ * positions, which covers the thousand-agent target with room to spare, and the wide
+ * aspect matches the field the canvas actually gets.
+ */
+const ARENA_COLS = 64;
+const ARENA_ROWS = 32;
+export const ARENA_CAPACITY = ARENA_COLS * ARENA_ROWS;
+/** Inset so a jittered glyph on the outer ring is never clipped by the field edge. */
+const ARENA_PAD = 0.012;
+/** Jitter as a fraction of a cell. Enough to break the grid, not enough to collide. */
+const JITTER = 0.34;
 
-export interface AgentDistrict {
+/**
+ * A room, as an attribute of the population rather than as a place.
+ *
+ * Deliberately carries no bounds: there is one arena, and rooms are read from agent
+ * colour, the legend and the filters.
+ */
+export interface ArenaRoom {
   room: string;
-  /** District bounds in the unit square. */
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  /** Senders anchored to this district, including any that did not fit on stage. */
+  /** Senders whose latest observed room is this one. */
   memberCount: number;
-  /** Senders actually given a position. */
-  drawnCount: number;
-  /** `memberCount - drawnCount`. Reported rather than silently dropped. */
-  overflow: number;
   messagesObserved: number;
 }
 
@@ -68,12 +82,12 @@ export interface AgentsLayout {
   /** Sender count. All parallel arrays are valid for `0..count-1`. */
   count: number;
   ids: string[];
-  /** Normalized positions in the unit square. `-1` means "not on stage". */
+  /** Normalized positions in the shared arena's unit square. `-1` means "not placed". */
   x: Float32Array;
   y: Float32Array;
-  /** Index into `districts` of the sender's anchor room, or -1. */
-  district: Int32Array;
-  /** Depth row, 0 at the back. Drives scale and dimming, so the stage reads as a scene. */
+  /** Index into `rooms` of the sender's latest observed room, or -1. Colour, not place. */
+  room: Int32Array;
+  /** Depth row, 0 at the back. Drives scale and dimming, so the arena reads as a scene. */
   depth: Float32Array;
   didPresent: Uint8Array;
   multiRoom: Uint8Array;
@@ -82,10 +96,12 @@ export interface AgentsLayout {
   phase: Float32Array;
   /** Slot index by sender id, for hit-test and focus lookups. */
   slotOf: Map<string, number>;
-  districts: AgentDistrict[];
-  districtOf: Map<string, number>;
-  /** Total senders given a position. The honest "how full is the stage" number. */
+  rooms: ArenaRoom[];
+  roomOf: Map<string, number>;
+  /** Total senders given a position in the arena. */
   drawnCount: number;
+  /** Senders beyond the arena's standing capacity. Reported rather than silently dropped. */
+  overflow: number;
 }
 
 export interface AgentsState {
@@ -100,14 +116,14 @@ export interface AgentsState {
   spawn: Float32Array;
   /** Most recent observation time at or before the sampled time. 0 when none in window. */
   lastAt: Float64Array;
-  /** District index of the most recent observation, or -1 when none in window. */
-  lastDistrict: Int32Array;
+  /** Room index of the most recent observation, or -1 when none in window. */
+  lastRoom: Int32Array;
   activeCount: number;
   pulseCount: number;
   presentCount: number;
   spawnCount: number;
-  /** Per-district heat, 0..1. */
-  districtHeat: Float32Array;
+  /** Per-room heat, 0..1. */
+  roomHeat: Float32Array;
 }
 
 /**
@@ -117,7 +133,7 @@ export interface AgentsState {
  */
 export interface AgentBubble {
   slot: number;
-  district: number;
+  room: number;
   text: string;
   /** 0 when just observed, 1 at the end of the bubble's life. */
   age: number;
@@ -126,41 +142,34 @@ export interface AgentBubble {
 /* ────────────────────────────── layout ────────────────────────────── */
 
 /**
- * Deterministic district + agent placement for a session.
+ * Deterministic placement of the whole observed population into one shared arena.
  *
- * Districts tile a grid in room-observation order, so a room keeps its stage territory
- * for the life of the session. Inside a district, agents fill depth rows in arrival
- * order, and their column is chosen by a bit-reversal permutation: the first agents
- * spread across the whole district rather than piling up on the left, and — critically —
- * agent `k-1` never moves when agent `k` arrives.
+ * A sender's standing position is chosen by a hash of its own id, not by its room: there
+ * are no districts to belong to, so a sender observed in a second room keeps its place and
+ * only changes colour. Hash collisions are resolved by probing forward through the cell
+ * grid in lane order — lanes are assigned on first observation and never reused, so an
+ * arriving agent can only ever take a still-free cell and never displaces one already
+ * standing.
+ *
+ * Sub-cell jitter, also derived from the id, breaks the underlying grid so the result
+ * reads as an organised crowd rather than as a spreadsheet, while staying a pure function
+ * of identity: the same session always produces the same arena, in live, in replay and
+ * after an import.
  */
 export function buildAgentsLayout(session: ObservationSessionState): AgentsLayout {
   const roomNames = [...session.rooms.keys()];
-  const districtOf = new Map<string, number>();
-  const grid = gridFor(roomNames.length);
-
-  const districts: AgentDistrict[] = roomNames.map((room, i) => {
-    const col = i % grid.cols;
-    const row = Math.floor(i / grid.cols);
-    const cellW = 1 / grid.cols;
-    const cellH = 1 / grid.rows;
-    const pad = 0.008;
-    districtOf.set(room, i);
+  const roomOf = new Map<string, number>();
+  const rooms: ArenaRoom[] = roomNames.map((room, i) => {
+    roomOf.set(room, i);
     return {
       room,
-      x: col * cellW + pad,
-      y: row * cellH + pad,
-      w: cellW - pad * 2,
-      h: cellH - pad * 2,
       memberCount: 0,
-      drawnCount: 0,
-      overflow: 0,
       messagesObserved: session.rooms.get(room)?.messagesObserved ?? 0,
     };
   });
 
   // Lane order is the session's own arrival order: lanes are assigned on first
-  // observation and never reused.
+  // observation and never reused, which is what makes cell probing append-only.
   const senders = [...session.senders.values()].sort((a, b) => a.lane - b.lane);
   const count = senders.length;
   const layout: AgentsLayout = {
@@ -168,105 +177,81 @@ export function buildAgentsLayout(session: ObservationSessionState): AgentsLayou
     ids: new Array<string>(count),
     x: new Float32Array(count),
     y: new Float32Array(count),
-    district: new Int32Array(count),
+    room: new Int32Array(count),
     depth: new Float32Array(count),
     didPresent: new Uint8Array(count),
     multiRoom: new Uint8Array(count),
     firstObservedAt: new Float64Array(count),
     phase: new Float32Array(count),
     slotOf: new Map<string, number>(),
-    districts,
-    districtOf,
+    rooms,
+    roomOf,
     drawnCount: 0,
+    overflow: 0,
   };
 
-  const ordinal = new Int32Array(Math.max(districts.length, 1));
-  const cols = Math.max(1, Math.ceil(DISTRICT_CAPACITY / DISTRICT_ROWS));
+  const occupied = new Uint8Array(ARENA_CAPACITY);
+  const span = 1 - ARENA_PAD * 2;
 
   for (let slot = 0; slot < count; slot++) {
     const sender = senders[slot];
-    // Anchored to the latest observed room: an agent stands where the session last saw
-    // it, and multi-room activity is shown as a marking rather than as a duplicate agent.
-    const anchor =
-      districtOf.get(sender.latestRoom) ?? districtOf.get(sender.roomsObserved[0] ?? '') ?? -1;
     const h = hash32(sender.id);
+    // Room membership is the latest observed room: an attribute of the agent, used for
+    // colour and filtering. It deliberately has no influence on position below.
+    const roomIndex =
+      roomOf.get(sender.latestRoom) ?? roomOf.get(sender.roomsObserved[0] ?? '') ?? -1;
+
     layout.ids[slot] = sender.id;
     layout.slotOf.set(sender.id, slot);
-    layout.district[slot] = anchor;
+    layout.room[slot] = roomIndex;
     layout.didPresent[slot] = sender.didPresent ? 1 : 0;
     layout.multiRoom[slot] = sender.roomsObserved.length > 1 ? 1 : 0;
     layout.firstObservedAt[slot] = sender.firstObservedAt;
     layout.phase[slot] = ((h >>> 8) % 6283) / 1000;
+    if (roomIndex >= 0) rooms[roomIndex].memberCount++;
 
-    if (anchor < 0) {
-      // No known room means no district to stand in. Park it off-stage rather than
-      // inventing a position for it.
+    const cell = claimCell(occupied, h);
+    if (cell < 0) {
+      // The arena is full. Park the agent rather than stack it on top of another, and
+      // report the overflow instead of pretending the population is smaller.
       layout.x[slot] = -1;
       layout.y[slot] = -1;
       layout.depth[slot] = 0;
+      layout.overflow++;
       continue;
     }
 
-    const district = districts[anchor];
-    const k = ordinal[anchor]++;
-    district.memberCount = ordinal[anchor];
+    const col = cell % ARENA_COLS;
+    const row = (cell - col) / ARENA_COLS;
+    const jitterX = ((h & 0xffff) / 0xffff - 0.5) * 2 * JITTER;
+    const jitterY = (((h >>> 16) & 0xffff) / 0xffff - 0.5) * 2 * JITTER;
 
-    if (k >= DISTRICT_CAPACITY) {
-      district.overflow = district.memberCount - district.drawnCount;
-      layout.x[slot] = -1;
-      layout.y[slot] = -1;
-      layout.depth[slot] = 0;
-      continue;
-    }
-
-    const row = k % DISTRICT_ROWS;
-    const col = columnOrder(cols)[Math.floor(k / DISTRICT_ROWS)];
-    const depth = row / Math.max(1, DISTRICT_ROWS - 1);
-
-    // Jitter breaks the grid so the result reads as a crowd rather than as a spreadsheet,
-    // while staying a pure function of the sender id.
-    const jitterX = ((h & 0xffff) / 0xffff - 0.5) * 0.7;
-    const jitterY = (((h >>> 16) & 0xffff) / 0xffff - 0.5) * 0.42;
-
-    // Top band is reserved for the district label and for bubbles, which rise above the
-    // agents and must not collide with the room name.
-    const bandTop = district.y + district.h * 0.34;
-    const bandH = district.h * 0.58;
-    const rowH = bandH / DISTRICT_ROWS;
-    const colW = (district.w * 0.94) / cols;
-
-    layout.x[slot] = district.x + district.w * 0.03 + colW * (col + 0.5) + jitterX * colW;
-    layout.y[slot] = bandTop + rowH * (row + 0.5) + jitterY * rowH;
-    layout.depth[slot] = depth;
-    district.drawnCount++;
+    layout.x[slot] = ARENA_PAD + ((col + 0.5 + jitterX) / ARENA_COLS) * span;
+    layout.y[slot] = ARENA_PAD + ((row + 0.5 + jitterY) / ARENA_ROWS) * span;
+    layout.depth[slot] = row / (ARENA_ROWS - 1);
     layout.drawnCount++;
   }
 
   return layout;
 }
 
-/** Bit-reversal column permutation, memoized. Even coverage at every prefix length. */
-const columnOrderCache = new Map<number, Int32Array>();
-function columnOrder(cols: number): Int32Array {
-  const cached = columnOrderCache.get(cols);
-  if (cached) return cached;
-  let size = 1;
-  let bits = 0;
-  while (size < cols) {
-    size <<= 1;
-    bits++;
-  }
-  const out: number[] = [];
-  for (let i = 0; i < size; i++) {
-    let r = 0;
-    for (let b = 0; b < bits; b++) {
-      if (i & (1 << b)) r |= 1 << (bits - 1 - b);
+/**
+ * The first free cell at or after `hash % capacity`.
+ *
+ * Linear probing, so placement stays O(1) amortized while the arena has room, and the
+ * fallback scan guarantees termination when it is nearly full. Returns -1 only when every
+ * standing position is taken.
+ */
+function claimCell(occupied: Uint8Array, hash: number): number {
+  const start = hash % ARENA_CAPACITY;
+  for (let step = 0; step < ARENA_CAPACITY; step++) {
+    const cell = (start + step) % ARENA_CAPACITY;
+    if (occupied[cell] === 0) {
+      occupied[cell] = 1;
+      return cell;
     }
-    if (r < cols) out.push(r);
   }
-  const order = Int32Array.from(out);
-  columnOrderCache.set(cols, order);
-  return order;
+  return -1;
 }
 
 /* ────────────────────────────── state ────────────────────────────── */
@@ -279,17 +264,17 @@ export function createAgentsState(count: number): AgentsState {
     pulse: new Float32Array(count),
     spawn: new Float32Array(count),
     lastAt: new Float64Array(count),
-    lastDistrict: new Int32Array(count).fill(-1),
+    lastRoom: new Int32Array(count).fill(-1),
     activeCount: 0,
     pulseCount: 0,
     presentCount: 0,
     spawnCount: 0,
-    districtHeat: new Float32Array(0),
+    roomHeat: new Float32Array(0),
   };
 }
 
 export interface AgentsSampleOptions {
-  /** `null` shows every district. A filter removes the rest from the sample. */
+  /** `null` shows the whole arena. A filter removes non-matching agents from the sample. */
   roomFilter?: string | null;
   decayMs?: number;
   pulseMs?: number;
@@ -298,7 +283,7 @@ export interface AgentsSampleOptions {
 }
 
 /**
- * The stage's visible state at an instant.
+ * The arena's visible state at an instant.
  *
  * `at` is the only time input, so replay is not a separate mode: moving the playhead
  * moves the agents, because the agents are a function of the playhead.
@@ -316,22 +301,22 @@ export function sampleAgentsState(
   const pulseMs = options.pulseMs ?? AGENT_PULSE_MS;
   const spawnMs = options.spawnMs ?? AGENT_SPAWN_MS;
   const filter = options.roomFilter ?? null;
-  const districtCount = Math.max(layout.districts.length, 1);
+  const roomCount = Math.max(layout.rooms.length, 1);
   const state =
     options.into && options.into.count === layout.count
-      ? resetState(options.into, districtCount)
-      : withDistricts(createAgentsState(layout.count), districtCount);
+      ? resetState(options.into, roomCount)
+      : withRooms(createAgentsState(layout.count), roomCount);
 
-  const filterDistrict = filter === null ? -2 : (layout.districtOf.get(filter) ?? -2);
+  const filterRoom = filter === null ? -2 : (layout.roomOf.get(filter) ?? -2);
 
-  // Presence is the population: a sender observed earlier in the session is still on
-  // stage at time `at`. This is what keeps a quiet live moment legible without
+  // Presence is the population: a sender observed earlier in the session is still in the
+  // arena at time `at`. This is what keeps a quiet live moment legible without
   // fabricating traffic.
   let presentCount = 0;
   let spawnCount = 0;
   for (let i = 0; i < layout.count; i++) {
     const first = layout.firstObservedAt[i];
-    const present = first <= at && (filter === null || layout.district[i] === filterDistrict);
+    const present = first <= at && (filter === null || layout.room[i] === filterRoom);
     state.present[i] = present ? 1 : 0;
     if (!present) continue;
     presentCount++;
@@ -367,7 +352,7 @@ export function sampleAgentsState(
     }
     if (m.observedAt > state.lastAt[slot]) {
       state.lastAt[slot] = m.observedAt;
-      state.lastDistrict[slot] = layout.districtOf.get(m.room) ?? -1;
+      state.lastRoom[slot] = layout.roomOf.get(m.room) ?? -1;
     }
     if (age <= pulseMs) {
       const progress = 1 - age / pulseMs;
@@ -376,9 +361,9 @@ export function sampleAgentsState(
         state.pulse[slot] = progress;
       }
     }
-    const districtIndex = layout.districtOf.get(m.room);
-    if (districtIndex !== undefined && heat > state.districtHeat[districtIndex]) {
-      state.districtHeat[districtIndex] = heat;
+    const roomIndex = layout.roomOf.get(m.room);
+    if (roomIndex !== undefined && heat > state.roomHeat[roomIndex]) {
+      state.roomHeat[roomIndex] = heat;
     }
   }
 
@@ -387,26 +372,26 @@ export function sampleAgentsState(
   return state;
 }
 
-function withDistricts(state: AgentsState, districtCount: number): AgentsState {
-  state.districtHeat = new Float32Array(districtCount);
+function withRooms(state: AgentsState, roomCount: number): AgentsState {
+  state.roomHeat = new Float32Array(roomCount);
   return state;
 }
 
-function resetState(state: AgentsState, districtCount: number): AgentsState {
+function resetState(state: AgentsState, roomCount: number): AgentsState {
   state.present.fill(0);
   state.heat.fill(0);
   state.pulse.fill(0);
   state.spawn.fill(0);
   state.lastAt.fill(0);
-  state.lastDistrict.fill(-1);
+  state.lastRoom.fill(-1);
   state.activeCount = 0;
   state.pulseCount = 0;
   state.presentCount = 0;
   state.spawnCount = 0;
-  if (state.districtHeat.length < districtCount) {
-    state.districtHeat = new Float32Array(districtCount);
+  if (state.roomHeat.length < roomCount) {
+    state.roomHeat = new Float32Array(roomCount);
   } else {
-    state.districtHeat.fill(0);
+    state.roomHeat.fill(0);
   }
   return state;
 }
@@ -422,15 +407,22 @@ export interface BubbleOptions {
   textMax?: number;
 }
 
+/** Screen regions used to spread bubbles out. Coarse on purpose. */
+const BUBBLE_REGION_COLS = 3;
+const BUBBLE_REGION_ROWS = 2;
+
 /**
  * Quote bubbles for the instant `at`.
  *
- * Deliberately sampled, not exhaustive: a busy room would otherwise bury its own agents
- * under speech. Eligibility is decided by a hash of `(sender, room, seq)`, so the same
- * instant always produces the same bubbles — a replay scrub is reproducible, and a
- * bubble does not flicker in and out between frames.
+ * Deliberately sampled, not exhaustive: one shared arena carrying a busy session would
+ * otherwise bury its own population under speech. Eligibility is decided by a hash of
+ * `(sender, room, seq)`, so the same instant always produces the same bubbles — a replay
+ * scrub is reproducible, and a bubble does not flicker in and out between frames.
  *
- * At most one bubble per agent, at most `max` on stage, newest first.
+ * Two passes, newest first: the first takes at most one bubble per coarse screen region so
+ * the selection is spread across the arena rather than clustered in one corner, and the
+ * second fills any remaining slots without that restriction. At most one bubble per agent,
+ * at most `max` on screen.
  */
 export function sampleAgentBubbles(
   session: ObservationSessionState,
@@ -453,24 +445,38 @@ export function sampleAgentBubbles(
 
   const bubbles: AgentBubble[] = [];
   const taken = new Set<number>();
-  for (let i = to; i >= from && bubbles.length < max; i--) {
-    const m = messages[i];
-    if (filter !== null && m.room !== filter) continue;
-    if (hash32(`${m.sender}|${m.room}|${m.seq}`) % sample !== 0) continue;
-    const slot = layout.slotOf.get(m.sender);
-    if (slot === undefined || taken.has(slot)) continue;
-    if (layout.x[slot] < 0) continue;
-    const text = sanitizeBubbleText(m.excerpt, textMax);
-    if (text.length === 0) continue;
-    taken.add(slot);
-    bubbles.push({
-      slot,
-      district: layout.districtOf.get(m.room) ?? layout.district[slot],
-      text,
-      age: Math.min(1, Math.max(0, (at - m.observedAt) / windowMs)),
-    });
+  const regions = new Set<number>();
+
+  for (let pass = 0; pass < 2 && bubbles.length < max; pass++) {
+    for (let i = to; i >= from && bubbles.length < max; i--) {
+      const m = messages[i];
+      if (filter !== null && m.room !== filter) continue;
+      if (hash32(`${m.sender}|${m.room}|${m.seq}`) % sample !== 0) continue;
+      const slot = layout.slotOf.get(m.sender);
+      if (slot === undefined || taken.has(slot)) continue;
+      if (layout.x[slot] < 0) continue;
+      const region = regionOf(layout.x[slot], layout.y[slot]);
+      // First pass spreads across the arena; second pass fills what is left.
+      if (pass === 0 && regions.has(region)) continue;
+      const text = sanitizeBubbleText(m.excerpt, textMax);
+      if (text.length === 0) continue;
+      taken.add(slot);
+      regions.add(region);
+      bubbles.push({
+        slot,
+        room: layout.roomOf.get(m.room) ?? layout.room[slot],
+        text,
+        age: Math.min(1, Math.max(0, (at - m.observedAt) / windowMs)),
+      });
+    }
   }
   return bubbles;
+}
+
+function regionOf(x: number, y: number): number {
+  const col = Math.min(BUBBLE_REGION_COLS - 1, Math.max(0, Math.floor(x * BUBBLE_REGION_COLS)));
+  const row = Math.min(BUBBLE_REGION_ROWS - 1, Math.max(0, Math.floor(y * BUBBLE_REGION_ROWS)));
+  return row * BUBBLE_REGION_COLS + col;
 }
 
 /**
@@ -515,9 +521,9 @@ function lowerBound(messages: ObservationSessionState['messages'], t: number): n
   return lo;
 }
 
-/** Districts ranked by anchored population, for stage-level readouts. */
-export function rankedDistricts(layout: AgentsLayout): AgentDistrict[] {
-  return [...layout.districts]
-    .filter((d) => d.memberCount > 0 || d.messagesObserved > 0)
+/** Rooms ranked by observed population, for arena-level readouts and the legend. */
+export function rankedRooms(layout: AgentsLayout): ArenaRoom[] {
+  return [...layout.rooms]
+    .filter((r) => r.memberCount > 0 || r.messagesObserved > 0)
     .sort((a, b) => b.memberCount - a.memberCount || a.room.localeCompare(b.room));
 }

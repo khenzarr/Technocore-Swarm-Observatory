@@ -302,8 +302,8 @@ select {
 }
 
 /*
- * AGENTS is the same hero slot, played as a stage rather than as a field: a faint vertical
- * lift behind the districts so the population reads as standing in a lit space. Everything
+ * AGENTS is the same hero slot, played as an arena rather than as a field: a faint vertical
+ * lift behind one shared crowd so the population reads as standing in a lit space. Everything
  * else is drawn on the canvas.
  */
 .field.agents {

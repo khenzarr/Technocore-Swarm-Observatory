@@ -18,8 +18,12 @@ Three views read the same observation session at the same instant: **AGENTS**,
 **SWARM**, and **TIMELINE**.
 
 The default **AGENTS** view is the population view. Every observed sender becomes a
-tiny agent avatar standing in its room's district, with the district labelled and
-bounded so room structure is readable at a glance. An agent idles with a slow bob,
+tiny agent avatar standing in one shared arena — a single continuous field, not a set
+of per-room panels — so the view reads as one crowd. Room membership travels with the
+agent rather than dividing the space: its colour carries its latest observed room, and
+the legend, hover card and filters carry the rest. An agent's place in the arena is a
+function of its own identity, so a sender observed in a second room recolours where it
+stands instead of moving. An agent idles with a slow bob,
 then wakes when a message is observed: it brightens, pops, and emits a spark. A
 DID-bearing agent carries a halo; an agent seen in more than one room carries a small
 orbiting mote. A rate-limited sample of recent observations floats a short-lived quote
@@ -107,8 +111,8 @@ Technocore public rooms
 | `lib/sessionSchema.ts` | Untrusted-input validation for imported sessions |
 | `lib/synthetic.ts` | Synthetic generator and the stress fixture |
 | `lib/swarmModel.ts` | Deterministic room zones, sender placement, activity derivation |
-| `lib/agentsModel.ts` | Room districts, agent slots, wake state, sampled quote bubbles |
-| `components/AgentsStage.tsx` | Agents stage: avatars, districts, halos, bubbles |
+| `lib/agentsModel.ts` | Shared-arena agent placement, wake state, sampled quote bubbles |
+| `components/AgentsStage.tsx` | Agents arena: avatars, room colour, halos, bubbles |
 | `components/SwarmCanvas.tsx` | Swarm field: glyphs, zones, decay, pulses, streaks |
 | `components/ActivityChart.tsx` | Stacked room activity, coverage markers, scrubber |
 | `components/SwarmField.tsx` | Timeline view: per-sender lanes over time |

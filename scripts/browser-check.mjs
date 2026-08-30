@@ -6,7 +6,11 @@
  * console errors or page exceptions. Drives Chrome over CDP directly so the repo needs no
  * browser-automation dependency.
  *
- * Usage: node scripts/browser-check.mjs <url> [waitMs]
+ * The field readout includes a coarse occupancy grid, which is how the AGENTS arena claim is
+ * checked without a pixel-comparison test: one shared crowd paints most cells across the
+ * whole canvas, whereas per-room panels leave regular unpainted gutters between them.
+ *
+ * Usage: node scripts/browser-check.mjs <url> [waitMs] [viewToClick]
  */
 
 import { spawn } from 'node:child_process';
@@ -16,6 +20,8 @@ import { join } from 'node:path';
 
 const URL_ARG = process.argv[2] ?? 'http://localhost:3000/?demo=1';
 const WAIT_MS = Number(process.argv[3] ?? 9000);
+/** Optional mode label (AGENTS/SWARM/TIMELINE) to click after the first readout. */
+const VIEW_ARG = process.argv[4] ?? null;
 const PORT = 9333 + Math.floor(Math.random() * 200);
 
 const CHROME_CANDIDATES = [
@@ -47,6 +53,42 @@ const READOUT = `(() => {
   });
   const field = document.querySelector('.field canvas');
   const chart = document.querySelector('.chart canvas');
+  // Occupancy of the hero canvas over a 10x5 grid: painted share per cell, plus how many
+  // cells carry any ink at all. A shared arena fills nearly every cell.
+  let occupancy = null;
+  if (field) {
+    const ctx = field.getContext('2d');
+    if (ctx && field.width > 0) {
+      const cols = 10;
+      const rows = 5;
+      const cw = Math.floor(field.width / cols);
+      const ch = Math.floor(field.height / rows);
+      const cells = [];
+      for (let r = 0; r < rows; r++) {
+        const line = [];
+        for (let c = 0; c < cols; c++) {
+          const { data } = ctx.getImageData(c * cw, r * ch, cw, ch);
+          let painted = 0;
+          let sampled = 0;
+          for (let i = 3; i < data.length; i += 4 * 7) {
+            sampled++;
+            if (data[i] > 8) painted++;
+          }
+          line.push(+(painted / Math.max(sampled, 1)).toFixed(3));
+        }
+        cells.push(line);
+      }
+      const flat = cells.flat();
+      occupancy = {
+        grid: cells,
+        cellsWithInk: flat.filter((v) => v > 0.002).length,
+        cellsTotal: flat.length,
+        emptyColumns: Array.from({ length: cols }, (_, c) =>
+          cells.every((row) => row[c] <= 0.002) ? c : -1,
+        ).filter((c) => c >= 0),
+      };
+    }
+  }
   const fieldH = document.querySelector('.field')?.clientHeight ?? 0;
   const chartH = document.querySelector('.chart')?.clientHeight ?? 0;
   return {
@@ -63,6 +105,7 @@ const READOUT = `(() => {
     legend: [...document.querySelectorAll('.legend-room')].map((n) => n.textContent.trim()),
     roomChips: [...document.querySelectorAll('.rooms button')].map((b) => b.textContent.trim()).slice(0, 12),
     canvasInk: ink,
+    fieldOccupancy: occupancy,
     fieldHeight: fieldH,
     chartHeight: chartH,
     // The swarm must stay the hero: its share of the viewport, and the chart's.
@@ -147,6 +190,23 @@ try {
     console.log('READOUT_FAILED', JSON.stringify(response.result.exceptionDetails).slice(0, 500));
   }
   console.log('READOUT', JSON.stringify(response.result?.result?.value, null, 1));
+
+  // Optional second readout after switching modes, used for the mode-switch regression pass.
+  if (VIEW_ARG) {
+    await send('Runtime.evaluate', {
+      expression: `[...document.querySelectorAll('.viewswitch button')]
+        .find((b) => b.textContent.trim().toUpperCase() === ${JSON.stringify(VIEW_ARG.toUpperCase())})?.click()`,
+      returnByValue: true,
+    });
+    await sleep(3500);
+    const after = await send('Runtime.evaluate', {
+      expression: READOUT,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    console.log(`READOUT_AFTER_${VIEW_ARG.toUpperCase()}`, JSON.stringify(after.result?.result?.value, null, 1));
+  }
+
   console.log('CONSOLE_ISSUES', issues.length);
   for (const line of issues.slice(0, 12)) console.log('  -', line.slice(0, 400));
 } catch (error) {

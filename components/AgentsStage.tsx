@@ -4,10 +4,11 @@
  * AGENTS: the population view.
  *
  * The narrative counterpart to the swarm field. Every observed sender becomes one small
- * agent standing in its room's district, and the districts together read as a populated
- * scene rather than as a scatter plot. An agent idles with a slow bob, brightens and pops
- * when an observation lands on it, and a sampled few speak in short quote bubbles above
- * their heads.
+ * agent standing in a single shared arena — one continuous field, no per-room panels — so
+ * the view reads as one crowd rather than as a set of dashboards. Room membership travels
+ * with the agent instead of dividing the space: its colour, the legend, the hover card and
+ * the filters all carry it. An agent idles with a slow bob, brightens and pops when an
+ * observation lands on it, and a sampled few speak in short quote bubbles above their heads.
  *
  * The same rules as the swarm canvas apply. One canvas, one requestAnimationFrame loop,
  * no DOM per agent. Everything drawn is derived from `lib/agentsModel`, which reads the
@@ -36,13 +37,25 @@ import {
 const PAD_X = 14;
 const PAD_TOP = 12;
 const PAD_BOTTOM = 20;
-/** Agent body half-width bounds, in CSS pixels. The floor survives 1080p compression. */
-const AGENT_MIN = 2.4;
+/**
+ * Agent body half-width bounds, in CSS pixels.
+ *
+ * The floor is deliberately low: one shared arena holding a thousand agents has to shrink
+ * the glyph rather than drop anyone, and at this size the lozenge fallback still reads as a
+ * body. The ceiling keeps a nearly empty arena from turning into a handful of billboards.
+ */
+const AGENT_MIN = 2.1;
 const AGENT_MAX = 7.5;
 /** Below this body size the detailed minion is replaced by a simple lozenge. */
 const DETAIL_THRESHOLD = 3.4;
 /** Idle bob amplitude, as a multiple of body size. Deliberately small. */
 const BOB = 0.34;
+/** Arena grid spacing, in CSS pixels. A faint technical floor, not a room boundary. */
+const GRID_STEP = 46;
+/** Dim factor applied to every agent other than the focused one. */
+const DIM = 0.16;
+/** Upward nudges attempted before a bubble accepts an overlap. */
+const BUBBLE_ATTEMPTS = 4;
 
 export interface AgentsStageProps {
   session: ObservationSessionState;
@@ -136,91 +149,48 @@ export default function AgentsStage(props: AgentsStageProps) {
     const fieldH = cssH - PAD_TOP - PAD_BOTTOM;
     if (fieldW <= 0 || fieldH <= 0) return;
 
-    // Body size falls with density but never below the legibility floor. Districts, not
-    // the whole stage, set the scale: a crowded room should not shrink a quiet one.
-    const perDistrict = Math.max(
-      1,
-      Math.ceil(state.presentCount / Math.max(layout.districts.length, 1)),
-    );
+    // One scale for the whole arena: it is one space, so a single density figure governs
+    // it. Falls with population, floors at the legibility limit rather than dropping or
+    // stacking agents.
+    const present = Math.max(state.presentCount, 1);
     const body = Math.max(
       AGENT_MIN,
-      Math.min(
-        AGENT_MAX,
-        Math.sqrt(
-          (fieldW * fieldH) / Math.max(layout.districts.length, 1) / Math.max(perDistrict, 1),
-        ) * 0.2,
-      ),
+      Math.min(AGENT_MAX, Math.sqrt((fieldW * fieldH) / present) * 0.21),
     );
     geom.current = { x0: fieldX, y0: fieldY, w: fieldW, h: fieldH, body };
     const px = (u: number) => fieldX + u * fieldW;
     const py = (v: number) => fieldY + v * fieldH;
 
     const focusSlot = focusId === null ? -1 : (layout.slotOf.get(focusId) ?? -1);
-    const focusDistrict = focusSlot >= 0 ? layout.district[focusSlot] : -1;
     const detailed = body >= DETAIL_THRESHOLD;
     const t = bobClock.current / 1000;
 
-    // ── districts ──────────────────────────────────────────────────────
-    for (let d = 0; d < layout.districts.length; d++) {
-      const district = layout.districts[d];
-      if (filter !== null && district.room !== filter) continue;
-      if (district.memberCount === 0 && district.messagesObserved === 0) continue;
-      const heat = state.districtHeat[d] ?? 0;
-      const color = roomColor(district.room);
-      const x = px(district.x);
-      const y = py(district.y);
-      const w = district.w * fieldW;
-      const h = district.h * fieldH;
-      const inFocus = focusSlot < 0 || d === focusDistrict;
-
-      // A shallow well with a floor gradient: enough to read as a lit stage, low enough
-      // in contrast that it never competes with an agent.
-      const wash = ctx.createLinearGradient(x, y, x, y + h);
-      wash.addColorStop(0, withAlpha(color, (inFocus ? 0.03 : 0.012) + heat * 0.035));
-      wash.addColorStop(1, withAlpha(color, 0.004));
-      ctx.fillStyle = wash;
-      roundRect(ctx, x, y, w, h, 12);
-      ctx.fill();
-
-      ctx.strokeStyle = withAlpha(color, (inFocus ? 0.16 : 0.05) + heat * 0.26);
-      ctx.lineWidth = 1;
-      roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 12);
-      ctx.stroke();
-
-      // Ground line: the visual cue that agents are standing somewhere.
-      const groundY = Math.round(y + h * 0.945) + 0.5;
-      ctx.strokeStyle = withAlpha(color, 0.1 + heat * 0.16);
-      ctx.beginPath();
-      ctx.moveTo(x + 10, groundY);
-      ctx.lineTo(x + w - 10, groundY);
-      ctx.stroke();
-
-      // District label. Secondary to the population, but always readable.
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'alphabetic';
-      ctx.font = '600 11px ui-monospace, monospace';
-      ctx.fillStyle = withAlpha(color, inFocus ? 0.66 + heat * 0.3 : 0.22);
-      ctx.fillText(district.room.toUpperCase(), x + 10, y + 16);
-      ctx.font = '10px ui-monospace, monospace';
-      ctx.fillStyle = withAlpha('#7d94a6', inFocus ? 0.62 : 0.22);
-      const overflowNote = district.overflow > 0 ? ` · +${district.overflow} OFF STAGE` : '';
-      ctx.fillText(`${district.memberCount} AGENTS${overflowNote}`, x + 10, y + 29);
-    }
+    // ── arena ──────────────────────────────────────────────────────────
+    // One continuous environment: a dark ground, a faint technical grid, a single horizon
+    // band and a vignette. Deliberately no cards, panels or room rectangles — the crowd
+    // has to read as one population, and any internal box would break that instantly.
+    drawArena(ctx, fieldX, fieldY, fieldW, fieldH);
 
     // ── agents ─────────────────────────────────────────────────────────
     // One pass, back rows first, so a foreground agent overlaps the one behind it and the
-    // district reads as a crowd with depth.
+    // arena reads as a crowd with depth.
     const order = drawOrder(layout);
     for (const i of order) {
       if (state.present[i] === 0) continue;
-      const d = layout.district[i];
-      if (d < 0 || layout.x[i] < 0) continue;
+      const d = layout.room[i];
+      if (layout.x[i] < 0) continue;
 
       const heat = state.heat[i];
       const pulse = state.pulse[i];
       const spawn = state.spawn[i];
-      const dimmed = focusSlot >= 0 && d !== focusDistrict;
-      const color = roomColor(layout.districts[d].room);
+      // Focus dims the rest of the population rather than the rest of a district: there
+      // are no districts, so emphasis is per agent.
+      const dimmed = focusSlot >= 0 && i !== focusSlot;
+      // Room colour rides on the agent. `lastRoom` is the room of its most recent
+      // observation in the window, so an agent seen elsewhere recolours in place instead
+      // of moving.
+      const roomIndex = state.lastRoom[i] >= 0 ? state.lastRoom[i] : d;
+      const color = roomIndex >= 0 ? roomColor(layout.rooms[roomIndex].room) : '#4a5a68';
 
       // Depth: the back rows sit slightly smaller and dimmer.
       const depthScale = 0.78 + layout.depth[i] * 0.28;
@@ -236,7 +206,7 @@ export default function AgentsStage(props: AgentsStageProps) {
       const y = py(layout.y[i]) + bobOffset + dropIn;
 
       const alpha =
-        (0.2 + layout.depth[i] * 0.1 + heat * 0.72) * (dimmed ? 0.22 : 1) * (0.35 + spawnEase * 0.65);
+        (0.34 + layout.depth[i] * 0.1 + heat * 0.6) * (dimmed ? DIM : 1) * (0.35 + spawnEase * 0.65);
 
       // Glow for genuinely active agents only, so the stage breathes with activity rather
       // than everywhere at once.
@@ -321,20 +291,33 @@ export default function AgentsStage(props: AgentsStageProps) {
     }
 
     // ── quote bubbles ──────────────────────────────────────────────────
-    // Drawn last so they always sit above the crowd. Sampled and capped by the model.
+    // Drawn last so they always sit above the crowd. Sampled and capped by the model; the
+    // only work here is keeping the few on screen from overlapping each other.
+    const placed: Rect[] = [];
     for (const bubble of bubbles) {
       if (state.present[bubble.slot] === 0) continue;
-      if (focusSlot >= 0 && layout.district[bubble.slot] !== focusDistrict) continue;
-      drawBubble(ctx, bubble, px(layout.x[bubble.slot]), py(layout.y[bubble.slot]), body, fieldX, fieldW);
+      if (focusSlot >= 0 && bubble.slot !== focusSlot) continue;
+      drawBubble(
+        ctx,
+        bubble,
+        px(layout.x[bubble.slot]),
+        py(layout.y[bubble.slot]),
+        body,
+        fieldX,
+        fieldY,
+        fieldW,
+        placed,
+      );
     }
 
-    // ── stage readout ──────────────────────────────────────────────────
+    // ── arena readout ──────────────────────────────────────────────────
     ctx.font = '10px ui-monospace, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
     ctx.fillStyle = '#4a5a68';
+    const overflowNote = layout.overflow > 0 ? ` · +${layout.overflow} BEYOND ARENA` : '';
     ctx.fillText(
-      `${state.presentCount.toLocaleString()} OBSERVED AGENTS · ${state.activeCount.toLocaleString()} ACTIVE NOW · ${layout.districts.length.toLocaleString()} DISTRICTS`,
+      `${state.presentCount.toLocaleString()} OBSERVED AGENTS · ${state.activeCount.toLocaleString()} ACTIVE NOW · ${layout.rooms.length.toLocaleString()} ROOMS${overflowNote}`,
       fieldX + 2,
       cssH - 6,
     );
@@ -502,10 +485,98 @@ function drawAgent(
 }
 
 /**
+ * The shared arena floor.
+ *
+ * One continuous environment for the entire population: a cool ground gradient, a faint
+ * technical grid, a single horizon band and a soft vignette. There is deliberately nothing
+ * here that subdivides the space — no cards, no panels, no room rectangles — because the
+ * whole point of this view is that the eye reads one crowd. Room identity is carried by the
+ * agents themselves and by the legend beneath the field.
+ */
+function drawArena(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void {
+  ctx.save();
+  roundRect(ctx, x, y, w, h, 14);
+  ctx.clip();
+
+  // Ground: darker at the back, so the field has a direction without needing a boundary.
+  const ground = ctx.createLinearGradient(x, y, x, y + h);
+  ground.addColorStop(0, 'rgba(8,14,24,0.92)');
+  ground.addColorStop(0.55, 'rgba(10,18,29,0.72)');
+  ground.addColorStop(1, 'rgba(6,11,19,0.9)');
+  ctx.fillStyle = ground;
+  ctx.fillRect(x, y, w, h);
+
+  // Technical grid. Rows compress towards the back, which does most of the work of making
+  // a flat scatter of glyphs read as a floor that agents are standing on.
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(53,230,255,0.045)';
+  ctx.beginPath();
+  for (let gx = x + GRID_STEP; gx < x + w; gx += GRID_STEP) {
+    const gridX = Math.round(gx) + 0.5;
+    ctx.moveTo(gridX, y);
+    ctx.lineTo(gridX, y + h);
+  }
+  for (let row = 1; row < 14; row++) {
+    const v = Math.pow(row / 14, 1.55);
+    const gridY = Math.round(y + v * h) + 0.5;
+    ctx.moveTo(x, gridY);
+    ctx.lineTo(x + w, gridY);
+  }
+  ctx.stroke();
+
+  // Horizon: a single soft band near the back. Atmosphere, not a container.
+  const horizon = ctx.createLinearGradient(x, y, x, y + h * 0.3);
+  horizon.addColorStop(0, 'rgba(53,230,255,0.07)');
+  horizon.addColorStop(1, 'rgba(53,230,255,0)');
+  ctx.fillStyle = horizon;
+  ctx.fillRect(x, y, w, h * 0.3);
+
+  // Vignette, so the crowd fades into the field instead of ending at a hard edge.
+  const vignette = ctx.createRadialGradient(
+    x + w / 2,
+    y + h * 0.55,
+    Math.min(w, h) * 0.25,
+    x + w / 2,
+    y + h * 0.55,
+    Math.max(w, h) * 0.62,
+  );
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(2,4,10,0.55)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(x, y, w, h);
+  ctx.restore();
+
+  // A single hairline boundary for the arena as a whole: one frame around one space.
+  ctx.strokeStyle = 'rgba(53,230,255,0.1)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 14);
+  ctx.stroke();
+}
+
+/** An axis-aligned box, used only for keeping the few live bubbles off each other. */
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
  * A short-lived quote bubble.
  *
  * `bubble.text` is already sanitized and truncated by the model. It is painted as plain
  * text; nothing here parses it, and no URL inside it is ever resolved or followed.
+ *
+ * Placement nudges upward while the candidate box overlaps one already placed. With at most
+ * `BUBBLE_MAX` bubbles on screen this is a handful of comparisons per frame — deliberately
+ * a small heuristic rather than a layout solver, since the alternative to a rare overlap is
+ * a physics engine nobody needs.
  */
 function drawBubble(
   ctx: CanvasRenderingContext2D,
@@ -514,7 +585,9 @@ function drawBubble(
   y: number,
   body: number,
   fieldX: number,
+  fieldY: number,
   fieldW: number,
+  placed: Rect[],
 ): void {
   // Ease in fast, hold, fade out. Never a hard pop-out.
   const fade = bubble.age < 0.12 ? bubble.age / 0.12 : bubble.age > 0.7 ? (1 - bubble.age) / 0.3 : 1;
@@ -529,8 +602,20 @@ function drawBubble(
   const w = textW + padX * 2;
   const h = 17;
   // Rise as it ages, and keep the whole bubble inside the field rather than clipping it.
-  const cy = y - body * 3.2 - 8 - bubble.age * 6;
+  let cy = y - body * 3.2 - 8 - bubble.age * 6;
   const cx = Math.max(fieldX + 2, Math.min(fieldX + fieldW - w - 2, x - w / 2));
+
+  // Lift clear of earlier bubbles, but never out of the arena: an overlap is a smaller
+  // problem than a bubble floating outside the field.
+  for (let attempt = 0; attempt < BUBBLE_ATTEMPTS; attempt++) {
+    const box: Rect = { x: cx, y: cy - h / 2, w, h };
+    const clash = placed.find((p) => overlaps(p, box));
+    if (!clash) break;
+    const lifted = clash.y - h / 2 - 3;
+    if (lifted - h / 2 < fieldY + 2) break;
+    cy = lifted;
+  }
+  placed.push({ x: cx, y: cy - h / 2, w, h });
 
   ctx.fillStyle = withAlpha('#070c14', 0.9 * alpha);
   roundRect(ctx, cx, cy - h / 2, w, h, 5);
@@ -552,6 +637,14 @@ function drawBubble(
 
   ctx.fillStyle = withAlpha('#cfe6f2', 0.92 * alpha);
   ctx.fillText(bubble.text, cx + padX, cy);
+}
+
+/** Box overlap, with a small margin so two bubbles never merely touch. */
+function overlaps(a: Rect, b: Rect): boolean {
+  const gap = 2;
+  return (
+    a.x < b.x + b.w + gap && a.x + a.w + gap > b.x && a.y < b.y + b.h + gap && a.y + a.h + gap > b.y
+  );
 }
 
 /** Agent inspection card. Every value is text; nothing here is ever markup. */

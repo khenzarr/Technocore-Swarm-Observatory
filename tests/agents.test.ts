@@ -2,21 +2,24 @@
  * Agents render-model tests.
  *
  * AGENTS mode is a canvas, so the durable half of the guarantee is the derivation layer in
- * `lib/agentsModel`: district placement, presence, activity heat, bubble sampling and
+ * `lib/agentsModel`: shared-arena placement, presence, activity heat, bubble sampling and
  * excerpt sanitization. The canvas draws whatever these functions return, so these tests
- * cover determinism, time-only sampling (the property replay depends on), and the security
- * rules around sender-authored bubble text.
+ * cover determinism, time-only sampling (the property replay depends on), the arena
+ * invariants that keep the population one crowd rather than a set of room panels, and the
+ * security rules around sender-authored bubble text.
  */
 import { describe, expect, it } from 'vitest';
 import { ObservationSessionState } from '@/lib/session';
 import { generateSyntheticSession } from '@/lib/synthetic';
 import {
   AGENT_DECAY_MS,
+  ARENA_CAPACITY,
+  BUBBLE_MAX,
   BUBBLE_MS,
   BUBBLE_TEXT_MAX,
   buildAgentsLayout,
   createAgentsState,
-  rankedDistricts,
+  rankedRooms,
   sampleAgentBubbles,
   sampleAgentsState,
   sanitizeBubbleText,
@@ -42,7 +45,8 @@ function liveFixture(): ObservationSessionState {
     provenance: 'live',
   });
 
-  // `alice` appears again in a second room, which makes her multi-room and moves her anchor.
+  // `alice` appears again in a second room, which makes her multi-room and recolours her.
+  // It must not move her: there are no districts to move between.
   session.ingestRoomRead({
     room: 'technocore',
     firstSeq: 1,
@@ -60,52 +64,97 @@ function liveFixture(): ObservationSessionState {
 }
 
 describe('buildAgentsLayout', () => {
-  it('gives every observed room a district and every sender a slot', () => {
+  it('gives every sender a slot in one shared arena', () => {
     const layout = buildAgentsLayout(liveFixture());
 
     expect(layout.count).toBe(3);
-    expect(layout.districts.map((d) => d.room)).toEqual(['lobby', 'technocore']);
+    expect(layout.rooms.map((r) => r.room)).toEqual(['lobby', 'technocore']);
     expect([...layout.slotOf.keys()].sort()).toEqual(['alice', 'carol', 'did:key:zBob']);
-    // Every sender here has a known room, so the whole population is on stage.
+    // One arena, so the whole observed population stands in it.
     expect(layout.drawnCount).toBe(3);
+    expect(layout.overflow).toBe(0);
   });
 
-  it('keeps districts inside the unit square and non-overlapping in x/y bounds', () => {
+  it('places the entire population inside a single unit-square coordinate space', () => {
     const layout = buildAgentsLayout(generateSyntheticSession());
 
-    for (const d of layout.districts) {
-      expect(d.x).toBeGreaterThanOrEqual(0);
-      expect(d.y).toBeGreaterThanOrEqual(0);
-      expect(d.x + d.w).toBeLessThanOrEqual(1);
-      expect(d.y + d.h).toBeLessThanOrEqual(1);
-      expect(d.w).toBeGreaterThan(0);
-      expect(d.h).toBeGreaterThan(0);
+    expect(layout.drawnCount).toBeGreaterThan(0);
+    for (let i = 0; i < layout.count; i++) {
+      if (layout.x[i] < 0) continue;
+      expect(layout.x[i]).toBeGreaterThan(0);
+      expect(layout.x[i]).toBeLessThan(1);
+      expect(layout.y[i]).toBeGreaterThan(0);
+      expect(layout.y[i]).toBeLessThan(1);
+      expect(layout.depth[i]).toBeGreaterThanOrEqual(0);
+      expect(layout.depth[i]).toBeLessThanOrEqual(1);
     }
   });
 
-  it('places agents inside their own district', () => {
+  it('does not group positions by room: every room spreads across the whole arena', () => {
     const layout = buildAgentsLayout(generateSyntheticSession());
+
+    // Positions come from a hash of sender identity, so each populated room's members are
+    // scattered over the arena instead of occupying a territory. A per-room centroid near
+    // the middle of the field is the observable consequence; a district layout would pull
+    // each centroid into its own corner.
+    const sums = layout.rooms.map(() => ({ x: 0, y: 0, n: 0 }));
+    for (let i = 0; i < layout.count; i++) {
+      const room = layout.room[i];
+      if (room < 0 || layout.x[i] < 0) continue;
+      sums[room].x += layout.x[i];
+      sums[room].y += layout.y[i];
+      sums[room].n++;
+    }
+
+    const populated = sums.filter((s) => s.n >= 20);
+    expect(populated.length).toBeGreaterThan(1);
+    for (const s of populated) {
+      expect(Math.abs(s.x / s.n - 0.5)).toBeLessThan(0.2);
+      expect(Math.abs(s.y / s.n - 0.5)).toBeLessThan(0.2);
+    }
+  });
+
+  it('gives each standing agent its own cell, so the crowd is dense but not stacked', () => {
+    const layout = buildAgentsLayout(generateSyntheticSession());
+    const seen = new Set<string>();
 
     for (let i = 0; i < layout.count; i++) {
       if (layout.x[i] < 0) continue;
-      const d = layout.districts[layout.district[i]];
-      expect(d).toBeDefined();
-      // A small tolerance: jitter is intentionally allowed to graze the district edge.
-      expect(layout.x[i]).toBeGreaterThan(d.x - d.w * 0.1);
-      expect(layout.x[i]).toBeLessThan(d.x + d.w * 1.1);
-      expect(layout.y[i]).toBeGreaterThan(d.y);
-      expect(layout.y[i]).toBeLessThan(d.y + d.h);
+      const key = `${layout.x[i]}|${layout.y[i]}`;
+      expect(seen.has(key)).toBe(false);
+      seen.add(key);
     }
+    expect(seen.size).toBe(layout.drawnCount);
+    expect(layout.drawnCount).toBeLessThanOrEqual(ARENA_CAPACITY);
   });
 
-  it('anchors a sender to its latest observed room and marks it multi-room', () => {
+  it('keeps a sender in place when it is observed in another room, and only recolours it', () => {
     const session = liveFixture();
     const layout = buildAgentsLayout(session);
     const alice = layout.slotOf.get('alice')!;
+    const before = { x: layout.x[alice], y: layout.y[alice] };
 
-    expect(layout.districts[layout.district[alice]].room).toBe('technocore');
+    // Latest room is the colour, and alice has now been seen in two rooms.
+    expect(layout.rooms[layout.room[alice]].room).toBe('technocore');
     expect(layout.multiRoom[alice]).toBe(1);
     expect(layout.didPresent[alice]).toBe(0);
+
+    session.ingestRoomRead({
+      room: 'kibble',
+      firstSeq: 1,
+      lastSeq: 1,
+      seqs: [1],
+      observedAt: T0 + 120_000,
+      messages: [{ seq: 1, ts: 'x', from: 'alice', text: 'six' }],
+      provenance: 'live',
+    });
+
+    const after = buildAgentsLayout(session);
+    const slot = after.slotOf.get('alice')!;
+    // A third room changes her colour, not her place in the arena.
+    expect(after.rooms[after.room[slot]].room).toBe('kibble');
+    expect(after.x[slot]).toBeCloseTo(before.x, 6);
+    expect(after.y[slot]).toBeCloseTo(before.y, 6);
   });
 
   it('reports DID presence from the literal prefix only', () => {
@@ -129,7 +178,10 @@ describe('buildAgentsLayout', () => {
   it('does not move existing agents when a new sender arrives', () => {
     const session = liveFixture();
     const before = buildAgentsLayout(session);
-    const aliceBefore = { x: before.x[before.slotOf.get('alice')!], y: before.y[before.slotOf.get('alice')!] };
+    const aliceBefore = {
+      x: before.x[before.slotOf.get('alice')!],
+      y: before.y[before.slotOf.get('alice')!],
+    };
 
     session.ingestRoomRead({
       room: 'lobby',
@@ -148,16 +200,17 @@ describe('buildAgentsLayout', () => {
     expect(after.slotOf.has('dave')).toBe(true);
   });
 
-  it('parks a sender with no known district off-stage rather than inventing a position', () => {
+  it('handles an empty session without inventing a population', () => {
     const session = new ObservationSessionState('live', T0);
     const layout = buildAgentsLayout(session);
     expect(layout.count).toBe(0);
     expect(layout.drawnCount).toBe(0);
+    expect(layout.rooms).toEqual([]);
   });
 });
 
 describe('sampleAgentsState', () => {
-  it('treats presence as cumulative: a sender observed earlier is still on stage', () => {
+  it('treats presence as cumulative: a sender observed earlier is still in the arena', () => {
     const session = liveFixture();
     const layout = buildAgentsLayout(session);
 
@@ -168,6 +221,23 @@ describe('sampleAgentsState', () => {
     expect(late.presentCount).toBe(3); // carol has arrived
     // Nobody is warm ten minutes after the last observation, but everybody is still shown.
     expect(late.activeCount).toBe(0);
+  });
+
+  it('changes the visible population as the replay instant moves', () => {
+    const session = generateSyntheticSession();
+    const layout = buildAgentsLayout(session);
+    const first = session.messages[0].observedAt;
+    const last = session.messages[session.messages.length - 1].observedAt;
+
+    const start = sampleAgentsState(session, layout, first);
+    const middle = sampleAgentsState(session, layout, first + (last - first) / 2);
+    const end = sampleAgentsState(session, layout, last);
+
+    // The arena fills up over the session rather than showing the final population at
+    // every playhead position.
+    expect(start.presentCount).toBeLessThan(middle.presentCount);
+    expect(middle.presentCount).toBeLessThan(end.presentCount);
+    expect(end.presentCount).toBeLessThanOrEqual(layout.count);
   });
 
   it('is a pure function of the sampled instant', () => {
@@ -226,7 +296,23 @@ describe('sampleAgentsState', () => {
     expect(before.lastAt[carol]).toBe(0);
   });
 
-  it('scopes the stage to one district under a room filter', () => {
+  it('tracks the room of the latest observation, which is what recolours an agent', () => {
+    const session = liveFixture();
+    const layout = buildAgentsLayout(session);
+    const alice = layout.slotOf.get('alice')!;
+    const lobby = layout.roomOf.get('lobby')!;
+    const technocore = layout.roomOf.get('technocore')!;
+
+    const inLobby = sampleAgentsState(session, layout, T0 + 1_000);
+    const inTechnocore = sampleAgentsState(session, layout, T0 + 60_000);
+
+    expect(inLobby.lastRoom[alice]).toBe(lobby);
+    expect(inTechnocore.lastRoom[alice]).toBe(technocore);
+    // Recolouring never relocates: position belongs to the layout, not to the sample.
+    expect(layout.x[alice]).toBeGreaterThan(0);
+  });
+
+  it('filters the arena by room without partitioning it', () => {
     const session = liveFixture();
     const layout = buildAgentsLayout(session);
     const at = T0 + 61_000;
@@ -235,19 +321,23 @@ describe('sampleAgentsState', () => {
     const filtered = sampleAgentsState(session, layout, at, { roomFilter: 'lobby' });
 
     expect(all.presentCount).toBe(3);
-    // Only `did:key:zBob` is still anchored to lobby; alice's anchor moved to technocore.
+    // Only `did:key:zBob`'s latest room is lobby; alice's latest room is technocore.
     expect(filtered.presentCount).toBe(1);
     expect(filtered.present[layout.slotOf.get('did:key:zBob')!]).toBe(1);
     expect(filtered.present[layout.slotOf.get('carol')!]).toBe(0);
+    // Filtering hides agents; it never moves the ones that remain.
+    const bob = layout.slotOf.get('did:key:zBob')!;
+    expect(layout.x[bob]).toBeGreaterThan(0);
+    expect(layout.y[bob]).toBeGreaterThan(0);
   });
 
-  it('records per-district heat', () => {
+  it('records per-room heat', () => {
     const session = liveFixture();
     const layout = buildAgentsLayout(session);
-    const technocore = layout.districtOf.get('technocore')!;
+    const technocore = layout.roomOf.get('technocore')!;
 
     const state = sampleAgentsState(session, layout, T0 + 60_000);
-    expect(state.districtHeat[technocore]).toBeCloseTo(1, 3);
+    expect(state.roomHeat[technocore]).toBeCloseTo(1, 3);
   });
 
   it('reuses a caller-provided buffer without leaking the previous sample', () => {
@@ -278,7 +368,20 @@ describe('sampleAgentBubbles', () => {
     expect(a).toEqual(b);
   });
 
-  it('respects the concurrency ceiling and one bubble per agent', () => {
+  it('stays bounded by default, however busy the session is', () => {
+    const session = generateSyntheticSession();
+    const layout = buildAgentsLayout(session);
+    const last = session.messages[session.messages.length - 1].observedAt;
+
+    // Sampled across the whole session, never above the ceiling, never twice per agent.
+    for (let step = 0; step <= 10; step++) {
+      const bubbles = sampleAgentBubbles(session, layout, last - step * 1_000);
+      expect(bubbles.length).toBeLessThanOrEqual(BUBBLE_MAX);
+      expect(new Set(bubbles.map((b) => b.slot)).size).toBe(bubbles.length);
+    }
+  });
+
+  it('respects an explicit concurrency ceiling and one bubble per agent', () => {
     const session = generateSyntheticSession();
     const layout = buildAgentsLayout(session);
     const at = session.endedAt ?? Date.now();
@@ -374,22 +477,23 @@ describe('sanitizeBubbleText', () => {
   });
 });
 
-describe('rankedDistricts', () => {
-  it('ranks districts by anchored population', () => {
+describe('rankedRooms', () => {
+  it('ranks rooms by observed population, for the legend rather than for placement', () => {
     const layout = buildAgentsLayout(liveFixture());
-    const ranked = rankedDistricts(layout);
+    const ranked = rankedRooms(layout);
 
     expect(ranked.length).toBe(2);
     expect(ranked[0].memberCount).toBeGreaterThanOrEqual(ranked[1].memberCount);
-    expect(ranked.map((d) => d.room).sort()).toEqual(['lobby', 'technocore']);
+    expect(ranked.map((r) => r.room).sort()).toEqual(['lobby', 'technocore']);
   });
 
-  it('populates a stage from the synthetic session', () => {
+  it('fills the shared arena densely from the synthetic session', () => {
     const session = generateSyntheticSession();
     const layout = buildAgentsLayout(session);
 
-    // The demo must never open on an empty stage.
-    expect(layout.drawnCount).toBeGreaterThan(20);
-    expect(rankedDistricts(layout).length).toBeGreaterThan(1);
+    // The demo must open on a crowd, with several room colours mixed through it.
+    expect(layout.drawnCount).toBeGreaterThan(200);
+    expect(layout.overflow).toBe(0);
+    expect(rankedRooms(layout).length).toBeGreaterThan(1);
   });
 });
