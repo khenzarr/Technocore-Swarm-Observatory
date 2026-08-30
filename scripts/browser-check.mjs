@@ -46,16 +46,28 @@ const READOUT = `(() => {
     return { w: c.width, h: c.height, inkRatio: +(painted / Math.max(sampled, 1)).toFixed(4) };
   });
   const field = document.querySelector('.field canvas');
+  const chart = document.querySelector('.chart canvas');
+  const fieldH = document.querySelector('.field')?.clientHeight ?? 0;
+  const chartH = document.querySelector('.chart')?.clientHeight ?? 0;
   return {
     metrics,
+    headline: document.querySelector('.headline')?.textContent?.trim() ?? null,
     status: document.querySelector('.status')?.textContent?.trim() ?? null,
     observerStatus: document.querySelector('.observer-status')?.textContent?.trim() ?? null,
     notice: document.querySelector('.notice')?.textContent?.trim() ?? null,
     emptyOverlay: document.querySelector('.field .empty')?.textContent?.trim() ?? null,
     fieldAria: field?.getAttribute('aria-label') ?? null,
+    chartAria: chart?.getAttribute('aria-label') ?? null,
+    view: [...document.querySelectorAll('.viewswitch button')]
+      .map((b) => b.textContent.trim() + (b.dataset.active === 'true' ? '*' : '')),
+    legend: [...document.querySelectorAll('.legend-room')].map((n) => n.textContent.trim()),
     roomChips: [...document.querySelectorAll('.rooms button')].map((b) => b.textContent.trim()).slice(0, 12),
     canvasInk: ink,
-    fieldHeight: document.querySelector('.field')?.clientHeight ?? null,
+    fieldHeight: fieldH,
+    chartHeight: chartH,
+    // The swarm must stay the hero: its share of the viewport, and the chart's.
+    fieldViewportShare: +(fieldH / window.innerHeight).toFixed(3),
+    chartViewportShare: +(chartH / window.innerHeight).toFixed(3),
   };
 })()`;
 

@@ -10,6 +10,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SwarmField from './SwarmField';
+import SwarmCanvas from './SwarmCanvas';
+import ActivityChart from './ActivityChart';
 import RateChart from './RateChart';
 import { ObservationSessionState } from '@/lib/session';
 import { LiveCollector, type CollectorStatus } from '@/lib/collector';
@@ -80,7 +82,18 @@ export default function Observatory({
 
   /** Replay position, 0..1 across the session's span. */
   const [replayAt, setReplayAt] = useState(1);
+  /** Replay transport. Scrubbing parks the playhead; PLAY resumes advancing it. */
+  const [replayPlaying, setReplayPlaying] = useState(true);
   const [now, setNow] = useState(() => Date.now());
+
+  /**
+   * Which visualization is on screen. SWARM is the default impression; TIMELINE keeps the
+   * trail-oriented view for reading one sender's history against time.
+   */
+  const [view, setView] = useState<'swarm' | 'timeline'>('swarm');
+  /** Focused sender id, or `null`. Lightweight emphasis, not a profile system. */
+  const [focused, setFocused] = useState<string | null>(null);
+
 
   // The same object the initial aggregates were read from, so the numbers in the header and
   // the marks on the canvas can never describe two different sessions.
@@ -152,13 +165,17 @@ export default function Observatory({
     const id = setInterval(() => {
       const s = sessionRef.current;
       if (mode === 'replay') {
-        const startedAt = s.startedAt;
-        const endedAt = s.endedAt ?? Date.now();
-        const span = Math.max(endedAt - startedAt, 1);
-        setReplayAt((at) => {
-          const advanced = at + (SAMPLE_MS * speed) / span;
-          return advanced >= 1 ? 1 : advanced;
-        });
+        // A parked playhead stays parked: scrubbing is an explicit instruction about which
+        // instant to inspect, and advancing over it would fight the pointer.
+        if (replayPlaying) {
+          const startedAt = s.startedAt;
+          const endedAt = s.endedAt ?? Date.now();
+          const span = Math.max(endedAt - startedAt, 1);
+          setReplayAt((at) => {
+            const advanced = at + (SAMPLE_MS * speed) / span;
+            return advanced >= 1 ? 1 : advanced;
+          });
+        }
       } else {
         // A synthetic session is a fixed window ending at its own end time.
         setNow(s.provenance === 'synthetic' ? (s.endedAt ?? Date.now()) : Date.now());
@@ -168,7 +185,7 @@ export default function Observatory({
       if (s.rooms.size !== rooms.length && mode !== 'live') setRooms([...s.rooms.keys()]);
     }, SAMPLE_MS);
     return () => clearInterval(id);
-  }, [mode, speed, rooms.length]);
+  }, [mode, speed, rooms.length, replayPlaying]);
 
   // Replay maps its normalized position onto the session's own time span.
   const replayNow = useMemo(() => {
@@ -194,6 +211,30 @@ export default function Observatory({
   const goDemo = useCallback(() => {
     adopt(generateSyntheticSession(), 'synthetic');
   }, [adopt]);
+
+  /** Entering replay from the chart or the console always starts from the beginning. */
+  const goReplay = useCallback(() => {
+    setMode('replay');
+    setReplayPlaying(true);
+    setReplayAt(0);
+  }, []);
+
+  /**
+   * Dragging the historical chart is also how replay is entered: a scrub implies the
+   * viewer wants a past instant, so the swarm follows the playhead rather than the clock.
+   */
+  const scrubTo = useCallback(
+    (at: number) => {
+      const s = sessionRef.current;
+      const startedAt = s.startedAt;
+      const endedAt = s.endedAt ?? Date.now();
+      const span = Math.max(endedAt - startedAt, 1);
+      setMode('replay');
+      setReplayPlaying(false);
+      setReplayAt(Math.max(0, Math.min(1, (at - startedAt) / span)));
+    },
+    [],
+  );
 
   const exportSession = useCallback(() => {
     const payload = sessionRef.current.toJSON();
@@ -257,6 +298,28 @@ export default function Observatory({
 
   const coverage = aggregates.knownSessionCoverage;
 
+  // The immediate hook: one sentence a viewer can read in two seconds. Phrased as
+  // "observed senders", never as a claim about how many agents exist on Technocore.
+  const headline =
+    aggregates.observations === 0
+      ? mode === 'live'
+        ? 'AWAITING FIRST OBSERVATION'
+        : 'NO OBSERVATIONS IN THIS SESSION'
+      : `${aggregates.senders.toLocaleString()} OBSERVED SENDERS ACROSS ${aggregates.rooms.toLocaleString()} ${aggregates.rooms === 1 ? 'ROOM' : 'ROOMS'}`;
+
+  /** Legend rows: the same stable room treatment the swarm and the chart both use. */
+  const legend = activeRooms.slice(0, 6);
+
+  // ESC leaves focus mode. Registered on the window so it works wherever the pointer is.
+  useEffect(() => {
+    if (focused === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFocused(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focused]);
+
   return (
     <main className="shell">
       <header className="masthead">
@@ -266,8 +329,9 @@ export default function Observatory({
             <span>SWARM OBSERVATORY</span>
           </h1>
           <p className="tagline">Live public activity, as observed.</p>
+          <p className="headline">{headline}</p>
         </div>
-        <div style={{ textAlign: 'right' }}>
+        <div className="masthead-right">
           <div className="status" data-mode={mode}>
             <span className="dot" />
             {statusLabel[mode]}
@@ -275,8 +339,15 @@ export default function Observatory({
           {observerStatus && (
             <div className="observer-status" data-state={collectorStatus}>{observerStatus}</div>
           )}
-          {notice && <div className="notice" style={{ marginTop: 6 }}>{notice}</div>}
-
+          {notice && <div className="notice">{notice}</div>}
+          <div className="viewswitch" role="group" aria-label="Visualization mode">
+            <button onClick={() => setView('swarm')} data-active={view === 'swarm'}>
+              SWARM
+            </button>
+            <button onClick={() => setView('timeline')} data-active={view === 'timeline'}>
+              TIMELINE
+            </button>
+          </div>
         </div>
       </header>
 
@@ -297,13 +368,55 @@ export default function Observatory({
         <RateChart series={series} now={rightEdge} windowMs={WINDOW_MS} />
       </section>
 
-      <SwarmField
+      {/* The hero. Both views read the same session at the same instant. */}
+      {view === 'swarm' ? (
+        <SwarmCanvas
+          session={session}
+          version={version}
+          now={rightEdge}
+          roomFilter={roomFilter}
+          focused={focused}
+          onFocus={setFocused}
+          paused={mode === 'paused'}
+        />
+      ) : (
+        <SwarmField
+          session={session}
+          version={version}
+          now={rightEdge}
+          windowMs={WINDOW_MS}
+          roomFilter={roomFilter}
+          paused={mode === 'paused'}
+        />
+      )}
+
+      <div className="legend">
+        {legend.map((room) => (
+          <span key={room} className="legend-room">
+            <i style={{ background: roomColor(room) }} />
+            {room}
+          </span>
+        ))}
+        {activeRooms.length > legend.length && (
+          <span className="legend-room" data-other="true">
+            <i />
+            other ({activeRooms.length - legend.length})
+          </span>
+        )}
+        <span className="legend-sep" />
+        <span className="legend-key"><i data-key="active" />active now</span>
+        <span className="legend-key"><i data-key="idle" />observed / idle</span>
+        <span className="legend-key"><i data-key="did" />DID present</span>
+        <span className="legend-key"><i data-key="multi" />multi-room</span>
+      </div>
+
+      {/* Historical activity, and the replay navigation surface. */}
+      <ActivityChart
         session={session}
         version={version}
         now={rightEdge}
-        windowMs={WINDOW_MS}
         roomFilter={roomFilter}
-        paused={mode === 'paused'}
+        onScrub={scrubTo}
       />
 
       <section className="console">
@@ -315,51 +428,60 @@ export default function Observatory({
           >
             Pause
           </button>
-          <button onClick={() => setMode('replay')} data-active={mode === 'replay'}>Replay</button>
+          <button onClick={goReplay} data-active={mode === 'replay'}>Replay</button>
           <button onClick={goDemo} data-active={mode === 'synthetic'}>Demo</button>
         </div>
 
         <span className="sep" />
 
-        {mode === 'replay' ? (
+        {mode === 'replay' && (
           <>
-            <label htmlFor="speed">Speed</label>
-            <select id="speed" value={speed} onChange={(e) => setSpeed(Number(e.target.value))}>
-              {REPLAY_SPEEDS.map((s) => (
-                <option key={s} value={s}>{s}x</option>
-              ))}
-            </select>
-            <input
-              className="scrubber"
-              type="range"
-              min={0}
-              max={1000}
-              value={Math.round(replayAt * 1000)}
-              onChange={(e) => setReplayAt(Number(e.target.value) / 1000)}
-              aria-label="Replay position"
-            />
-          </>
-        ) : (
-          <div className="rooms">
-            <button onClick={() => setRoomFilter(null)} data-active={roomFilter === null}>All</button>
-            {activeRooms.slice(0, 10).map((room) => (
+            <div className="group">
               <button
-                key={room}
-                onClick={() => setRoomFilter(room === roomFilter ? null : room)}
-                data-active={room === roomFilter}
-                style={{ color: room === roomFilter ? undefined : roomColor(room) }}
+                onClick={() => setReplayPlaying((p) => !p)}
+                data-active={replayPlaying}
+                aria-label={replayPlaying ? 'Pause replay' : 'Play replay'}
               >
-                <i />
-                {room}
+                {replayPlaying ? 'Pause' : 'Play'}
               </button>
-            ))}
-            {activeRooms.length > 10 && (
-              <span style={{ color: 'var(--ink-faint)', fontSize: 10 }}>
-                +{activeRooms.length - 10} more
-              </span>
-            )}
-          </div>
+              <button
+                onClick={() => {
+                  setReplayAt(0);
+                  setReplayPlaying(true);
+                }}
+              >
+                Restart
+              </button>
+            </div>
+            <div className="group speeds">
+              {REPLAY_SPEEDS.map((s) => (
+                <button key={s} onClick={() => setSpeed(s)} data-active={speed === s}>
+                  {s}x
+                </button>
+              ))}
+            </div>
+            <span className="sep" />
+          </>
         )}
+
+        {/* Room filters stay available in every mode: they scope the swarm and the chart. */}
+        <div className="rooms">
+          <button onClick={() => setRoomFilter(null)} data-active={roomFilter === null}>All</button>
+          {activeRooms.slice(0, 8).map((room) => (
+            <button
+              key={room}
+              onClick={() => setRoomFilter(room === roomFilter ? null : room)}
+              data-active={room === roomFilter}
+              style={{ color: room === roomFilter ? undefined : roomColor(room) }}
+            >
+              <i style={{ background: roomColor(room) }} />
+              {room}
+            </button>
+          ))}
+          {activeRooms.length > 8 && (
+            <span className="rooms-more">+{activeRooms.length - 8} more</span>
+          )}
+        </div>
 
         <span className="sep" />
 

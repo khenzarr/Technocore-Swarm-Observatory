@@ -11,5 +11,12 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    /*
+     * Several suites build large fixtures on purpose: the 26,000-observation demo session and
+     * the 1,000-sender / 50,000-observation stress fixture. Those walk the full message log
+     * with a per-message assertion, which outruns vitest's 5s default on a loaded machine
+     * while the files run in parallel. The bound stays low enough to catch a real hang.
+     */
+    testTimeout: 30_000,
   },
 });

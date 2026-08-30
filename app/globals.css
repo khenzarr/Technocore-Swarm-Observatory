@@ -97,11 +97,23 @@ select {
 /* ── layout ─────────────────────────────────────────────────────────── */
 
 .shell {
+  /*
+   * masthead · metrics · swarm (hero) · legend · historical chart · console · about.
+   * The hero takes every leftover row so the swarm keeps roughly 65–75% of the height,
+   * and the chart is capped below so it cannot grow past a quarter of the viewport.
+   */
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto auto;
   height: 100vh;
-  padding: 14px 18px 10px;
+  padding: 14px 20px 10px;
   gap: 10px;
+}
+
+.masthead-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
 }
 
 .masthead {
@@ -113,8 +125,33 @@ select {
   padding-bottom: 10px;
 }
 
+/* The two-second hook. Large enough to survive social-media video compression. */
+.headline {
+  margin: 9px 0 0;
+  font-size: 19px;
+  letter-spacing: 0.13em;
+  color: var(--ink);
+  line-height: 1.1;
+}
+
+/* Compact mode switch: SWARM | TIMELINE. */
+.viewswitch {
+  display: flex;
+  border: 1px solid var(--line-bright);
+}
+
+.viewswitch button {
+  padding: 5px 13px;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+}
+
+.viewswitch button + button {
+  border-left: 1px solid var(--line-bright);
+}
+
 .wordmark {
-  font-size: 22px;
+  font-size: 24px;
   letter-spacing: 0.34em;
   line-height: 1.1;
   margin: 0;
@@ -181,7 +218,7 @@ select {
 }
 
 .metric b {
-  font-size: 26px;
+  font-size: 30px;
   font-weight: 500;
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
@@ -189,8 +226,8 @@ select {
 }
 
 .metric small {
-  color: var(--ink-faint);
-  font-size: 10px;
+  color: var(--ink-dim);
+  font-size: 11px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
 }
@@ -253,6 +290,120 @@ select {
   font-size: 11px;
   text-transform: uppercase;
   pointer-events: none;
+}
+
+/*
+ * The swarm is the hero: it gets the leftover row of the shell grid, a slightly deeper
+ * well than the timeline field, and a cursor that advertises that glyphs are clickable.
+ */
+.field.swarm {
+  background: #02040799;
+  cursor: crosshair;
+}
+
+/* ── legend ─────────────────────────────────────────────────────────── */
+
+.legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+
+.legend-room,
+.legend-key {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.legend-room i {
+  width: 9px;
+  height: 9px;
+}
+
+.legend-room[data-other='true'] i {
+  background: var(--ink-faint);
+}
+
+.legend-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--line-bright);
+}
+
+.legend-key {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* Key swatches mirror the canvas glyph states, so the legend is not colour-only. */
+.legend-key i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.legend-key i[data-key='active'] {
+  background: var(--signal);
+  box-shadow: 0 0 7px var(--signal);
+}
+
+.legend-key i[data-key='idle'] {
+  background: #24333f;
+}
+
+.legend-key i[data-key='did'] {
+  background: transparent;
+  border: 1px solid var(--ink-dim);
+}
+
+.legend-key i[data-key='multi'] {
+  background: transparent;
+  border: 1px solid var(--ink-dim);
+  outline: 1px solid var(--ink-faint);
+  outline-offset: 2px;
+}
+
+/* ── historical activity chart ──────────────────────────────────────── */
+
+.chart {
+  position: relative;
+  /* Capped: the swarm stays the hero regardless of viewport height. */
+  height: min(22vh, 210px);
+  border: 1px solid var(--line);
+  background: #03050899;
+}
+
+.chart canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Scrubbing is a drag gesture, so advertise it and suppress text selection. */
+.chart[data-scrubbable='true'] canvas {
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.console .speeds button {
+  padding: 3px 7px;
+  font-size: 10px;
+}
+
+.rooms-more {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.1em;
 }
 
 .inspect {
@@ -445,8 +596,19 @@ details.about b {
   font-weight: 500;
 }
 
+/* 2560x1440 and up: spend the extra pixels on the numbers, not on more chrome. */
+@media (min-width: 2200px) {
+  html, body { font-size: 14px; }
+  .wordmark { font-size: 28px; }
+  .headline { font-size: 23px; }
+  .metric b { font-size: 36px; }
+  .chart { height: min(22vh, 250px); }
+}
+
 @media (max-width: 1100px) {
   details.about ul { columns: 1; }
   .metrics { gap: 20px; }
   .metric b { font-size: 20px; }
+  .headline { font-size: 15px; }
+  .chart { height: 150px; }
 }

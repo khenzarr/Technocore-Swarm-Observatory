@@ -12,15 +12,29 @@ silently presenting it as complete history.
 
 ## What it is
 
-Open it, leave it running, and it draws what Technocore is doing right now: every
-sender it has seen gets a stable lane, and each observed message becomes a mark on a
-left-to-right time axis. Hundreds of concurrently active senders read as a living
-swarm rather than a scrolling log.
+Open it, leave it running, and it draws what Technocore is doing right now.
+
+The default **SWARM** view places every observed sender as a small beacon glyph in a
+2D field, grouped into soft room territories. Positions are deterministic for a given
+session, so nothing teleports between frames. A sender brightens and pulses when a
+message is observed, then cools back toward idle, so the field visibly breathes with
+real activity. A DID-bearing sender carries an outer ring; a sender observed in more
+than one room carries a second ring and a brief curved streak toward the other room.
+Hundreds of concurrent senders read as a living swarm rather than a scrolling log.
+
+Below it, a stacked activity chart shows observations per time bucket by room, which
+answers *when did activity spike* and *which rooms drove it*. It doubles as the replay
+scrubber: drag the playhead and the swarm above re-derives to that moment.
+
+**TIMELINE** keeps the original trail-oriented view, where each sender holds a stable
+lane and each observed message is a mark on a left-to-right time axis.
 
 The second thing it draws is the part most dashboards omit: **what this observer
 did not see.** Technocore room history is bounded. A poller that falls behind the
 readable window loses sequence positions permanently. The Observatory records those
-discontinuities in a ledger and renders them as explicit bands on the timeline.
+discontinuities in a ledger and renders them as explicit markers on the activity
+chart — known gaps, room generation resets, and the start of observation, each
+visually distinct from the others.
 
 ## Why it exists
 
@@ -44,6 +58,11 @@ It generates several hundred senders across multiple rooms with activity spikes 
 several known gaps, and labels itself **SYNTHETIC DEMO** in the status area.
 Synthetic events are never mixed into a live session.
 
+Live mode is deliberately less dense than the demo. If only a handful of the session's
+senders are currently talking, the field shows exactly that: dormant senders stay dim,
+recently active ones brighten, and nothing is animated to imply traffic that was not
+observed.
+
 <!-- Screenshot / recording placeholder -->
 
 ## Architecture
@@ -57,7 +76,11 @@ Technocore public rooms
         |
    observer + coverage ledger       lib/observer.ts, lib/session.ts
         |
-   swarm visualization              components/SwarmField.tsx
+   swarm render model               lib/swarmModel.ts
+        |
+   canvas views                     components/SwarmCanvas.tsx
+                                    components/ActivityChart.tsx
+                                    components/SwarmField.tsx (timeline)
 ```
 
 | Path | Role |
@@ -68,7 +91,11 @@ Technocore public rooms
 | `lib/session.ts` | Session state, senders, buckets, aggregates, annotations |
 | `lib/sessionSchema.ts` | Untrusted-input validation for imported sessions |
 | `lib/synthetic.ts` | Synthetic generator and the stress fixture |
-| `components/Observatory.tsx` | Page shell, metrics, controls, filters |
+| `lib/swarmModel.ts` | Deterministic room zones, sender placement, activity derivation |
+| `components/SwarmCanvas.tsx` | Swarm field: glyphs, zones, decay, pulses, streaks |
+| `components/ActivityChart.tsx` | Stacked room activity, coverage markers, scrubber |
+| `components/SwarmField.tsx` | Timeline view: per-sender lanes over time |
+| `components/Observatory.tsx` | Page shell, headline stat, metrics, controls, filters |
 
 No database, no auth, no wallet, no LLM, no writes. Session state lives in browser
 memory for the lifetime of the tab.
@@ -107,7 +134,7 @@ priorCursor = null,  first_seq = 163993   ->  OBSERVATION STARTED
 ```
 
 This is not a gap of `1..163992`. Activity before the first observation is outside
-the session's coverage claim, and the timeline marks it with a quiet
+the session's coverage claim, and the activity chart marks it with a quiet
 `OBSERVATION STARTED` marker rather than a red band.
 
 ## Gap semantics
@@ -133,7 +160,9 @@ name now carries a different conversation, so the old cursor never described it.
 
 `LIVE` polls permitted public rooms. `PAUSE` stops polling and animation without
 discarding session data. `REPLAY` re-runs the current or imported session at 0.5x,
-1x, 2x, 5x, or 10x with a scrubber.
+1x, 2x, 5x, or 10x, scrubbable directly on the activity chart. The playhead drives the
+swarm as well as the chart: the field is re-derived to the replay instant rather than
+being left in its final state.
 
 ## Export and import
 
@@ -193,7 +222,10 @@ Desktop-first; laid out for 1920x1080 and 2560x1440.
   observe. It is not a statement about Technocore as a whole.
 - Cross-room sender unification relies on the protocol supplying the same sender
   value; no correlation is invented beyond that.
-- Sender lanes are stable within a session but not across sessions.
+- Sender lanes and swarm positions are stable within a session but not across
+  sessions.
+- Swarm position carries no meaning beyond room grouping. Proximity is layout, not
+  a relationship between senders.
 
 ## License
 
