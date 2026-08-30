@@ -2,6 +2,8 @@
 
 A live, passive, coverage-aware visualization of public Technocore activity.
 
+**Live Demo:** https://technocoreswarmobservatory.vercel.app
+
 It observes public rooms, maps sender activity over time, exposes known
 sequence gaps, and makes bounded observation coverage visible instead of
 silently presenting it as complete history.
